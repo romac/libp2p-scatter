@@ -1,8 +1,7 @@
 use crate::protocol::Message;
 use fnv::{FnvHashMap, FnvHashSet};
-use libp2p::core::connection::ConnectionId;
 use libp2p::swarm::{
-    NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler, PollParameters,
+    ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, OneShotHandler, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId};
 use std::collections::VecDeque;
@@ -10,6 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+mod length_prefixed;
 mod protocol;
 
 use libp2p::swarm::derive_prelude::FromSwarm;
@@ -21,6 +21,7 @@ pub enum BroadcastEvent {
     Unsubscribed(PeerId, Topic),
     Received(PeerId, Topic, Arc<[u8]>),
 }
+
 type Handler = OneShotHandler<BroadcastConfig, Message, HandlerEvent>;
 
 #[derive(Default)]
@@ -29,7 +30,7 @@ pub struct Broadcast {
     subscriptions: FnvHashSet<Topic>,
     peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
     topics: FnvHashMap<Topic, FnvHashSet<PeerId>>,
-    events: VecDeque<NetworkBehaviourAction<BroadcastEvent, Handler>>,
+    events: VecDeque<ToSwarm<BroadcastEvent, Message>>,
 }
 
 impl fmt::Debug for Broadcast {
@@ -67,12 +68,11 @@ impl Broadcast {
         self.subscriptions.insert(topic);
         let msg = Message::Subscribe(topic);
         for peer in self.peers.keys() {
-            self.events
-                .push_back(NetworkBehaviourAction::NotifyHandler {
-                    peer_id: *peer,
-                    event: msg.clone(),
-                    handler: NotifyHandler::Any,
-                });
+            self.events.push_back(ToSwarm::NotifyHandler {
+                peer_id: *peer,
+                event: msg.clone(),
+                handler: NotifyHandler::Any,
+            });
         }
     }
 
@@ -81,12 +81,11 @@ impl Broadcast {
         let msg = Message::Unsubscribe(*topic);
         if let Some(peers) = self.topics.get(topic) {
             for peer in peers {
-                self.events
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: *peer,
-                        event: msg.clone(),
-                        handler: NotifyHandler::Any,
-                    });
+                self.events.push_back(ToSwarm::NotifyHandler {
+                    peer_id: *peer,
+                    event: msg.clone(),
+                    handler: NotifyHandler::Any,
+                });
             }
         }
     }
@@ -95,12 +94,11 @@ impl Broadcast {
         let msg = Message::Broadcast(*topic, msg);
         if let Some(peers) = self.topics.get(topic) {
             for peer in peers {
-                self.events
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: *peer,
-                        event: msg.clone(),
-                        handler: NotifyHandler::Any,
-                    });
+                self.events.push_back(ToSwarm::NotifyHandler {
+                    peer_id: *peer,
+                    event: msg.clone(),
+                    handler: NotifyHandler::Any,
+                });
             }
         }
     }
@@ -108,12 +106,11 @@ impl Broadcast {
     fn inject_connected(&mut self, peer: &PeerId) {
         self.peers.insert(*peer, FnvHashSet::default());
         for topic in &self.subscriptions {
-            self.events
-                .push_back(NetworkBehaviourAction::NotifyHandler {
-                    peer_id: *peer,
-                    event: Message::Subscribe(*topic),
-                    handler: NotifyHandler::Any,
-                });
+            self.events.push_back(ToSwarm::NotifyHandler {
+                peer_id: *peer,
+                event: Message::Subscribe(*topic),
+                handler: NotifyHandler::Any,
+            });
         }
     }
 
@@ -129,18 +126,30 @@ impl Broadcast {
 }
 
 impl NetworkBehaviour for Broadcast {
-    type ConnectionHandler = OneShotHandler<BroadcastConfig, Message, HandlerEvent>;
-    type OutEvent = BroadcastEvent;
+    type ConnectionHandler = Handler;
+    type ToSwarm = BroadcastEvent;
 
-    fn new_handler(&mut self) -> Self::ConnectionHandler {
-        Default::default()
+    fn handle_established_inbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        _peer: PeerId,
+        _local_addr: &Multiaddr,
+        _remote_addr: &Multiaddr,
+    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+        Ok(Handler::default())
     }
 
-    fn addresses_of_peer(&mut self, _peer: &PeerId) -> Vec<Multiaddr> {
-        Vec::new()
+    fn handle_established_outbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        _peer: PeerId,
+        _addr: &Multiaddr,
+        _role_override: libp2p::core::Endpoint,
+    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+        Ok(Handler::default())
     }
 
-    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+    fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
         match event {
             FromSwarm::ConnectionEstablished(c) => {
                 if c.other_established == 0 {
@@ -156,10 +165,15 @@ impl NetworkBehaviour for Broadcast {
         }
     }
 
-    fn on_connection_handler_event(&mut self, peer: PeerId, _: ConnectionId, msg: HandlerEvent) {
+    fn on_connection_handler_event(
+        &mut self,
+        peer: PeerId,
+        _: ConnectionId,
+        msg: <Self::ConnectionHandler as ConnectionHandler>::ToBehaviour,
+    ) {
         use HandlerEvent::*;
         use Message::*;
-        let ev = match msg {
+        let ev = match msg.unwrap() {
             Rx(Subscribe(topic)) => {
                 let peers = self.topics.entry(topic).or_default();
                 self.peers.get_mut(&peer).unwrap().insert(topic);
@@ -178,15 +192,10 @@ impl NetworkBehaviour for Broadcast {
                 return;
             }
         };
-        self.events
-            .push_back(NetworkBehaviourAction::GenerateEvent(ev));
+        self.events.push_back(ToSwarm::GenerateEvent(ev));
     }
 
-    fn poll(
-        &mut self,
-        _: &mut Context,
-        _: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<BroadcastEvent, Handler>> {
+    fn poll(&mut self, _: &mut Context) -> Poll<ToSwarm<BroadcastEvent, Message>> {
         if let Some(event) = self.events.pop_front() {
             Poll::Ready(event)
         } else {
@@ -219,7 +228,7 @@ impl From<()> for HandlerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p::swarm::AddressRecord;
+
     use std::sync::{Arc, Mutex};
 
     struct DummySwarm {
@@ -263,20 +272,18 @@ mod tests {
             let mut ctx = Context::from_waker(&waker);
             let mut me = self.behaviour.lock().unwrap();
             loop {
-                match me.poll(&mut ctx, &mut DummyPollParameters) {
-                    Poll::Ready(NetworkBehaviourAction::NotifyHandler {
-                        peer_id, event, ..
-                    }) => {
+                match me.poll(&mut ctx) {
+                    Poll::Ready(ToSwarm::NotifyHandler { peer_id, event, .. }) => {
                         if let Some(other) = self.connections.get(&peer_id) {
                             let mut other = other.lock().unwrap();
                             other.on_connection_handler_event(
                                 *self.peer_id(),
-                                ConnectionId::new(0),
-                                HandlerEvent::Rx(event),
+                                ConnectionId::new_unchecked(0),
+                                Ok(HandlerEvent::Rx(event)),
                             );
                         }
                     }
-                    Poll::Ready(NetworkBehaviourAction::GenerateEvent(event)) => {
+                    Poll::Ready(ToSwarm::GenerateEvent(event)) => {
                         return Some(event);
                     }
                     Poll::Ready(_) => panic!(),
@@ -300,30 +307,6 @@ mod tests {
         fn broadcast(&self, topic: &Topic, msg: Arc<[u8]>) {
             let mut me = self.behaviour.lock().unwrap();
             me.broadcast(topic, msg);
-        }
-    }
-
-    struct DummyPollParameters;
-
-    impl PollParameters for DummyPollParameters {
-        type SupportedProtocolsIter = std::iter::Empty<Vec<u8>>;
-        type ListenedAddressesIter = std::iter::Empty<Multiaddr>;
-        type ExternalAddressesIter = std::iter::Empty<AddressRecord>;
-
-        fn supported_protocols(&self) -> Self::SupportedProtocolsIter {
-            unimplemented!()
-        }
-
-        fn listened_addresses(&self) -> Self::ListenedAddressesIter {
-            unimplemented!()
-        }
-
-        fn external_addresses(&self) -> Self::ExternalAddressesIter {
-            unimplemented!()
-        }
-
-        fn local_peer_id(&self) -> &PeerId {
-            unimplemented!()
         }
     }
 

@@ -8,6 +8,7 @@ description = "broadcast messages to connected peers"
 repository = "https://github.com/ipfs-rust/libp2p-broadcast"
 
 [dependencies]
-fnv = "1.0.7"
-futures = "0.3.21"
-libp2p = { version = "0.50.0" }
+fnv = "1.0"
+futures = "0.3"
+libp2p = "0.53"
+unsigned-varint = "0.8"
