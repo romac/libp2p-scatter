@@ -1,8 +1,9 @@
+use std::io::{Error, ErrorKind, Result};
+use std::sync::Arc;
+
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
-use std::io::{Error, ErrorKind, Result};
-use std::sync::Arc;
 
 use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
 
@@ -101,11 +102,11 @@ impl Message {
 }
 
 #[derive(Clone, Debug)]
-pub struct BroadcastConfig {
+pub struct Config {
     max_buf_size: usize,
 }
 
-impl Default for BroadcastConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             max_buf_size: 1024 * 1024 * 4,
@@ -113,7 +114,7 @@ impl Default for BroadcastConfig {
     }
 }
 
-impl UpgradeInfo for BroadcastConfig {
+impl UpgradeInfo for Config {
     type Info = &'static str;
     type InfoIter = std::iter::Once<Self::Info>;
 
@@ -122,7 +123,7 @@ impl UpgradeInfo for BroadcastConfig {
     }
 }
 
-impl<TSocket> InboundUpgrade<TSocket> for BroadcastConfig
+impl<TSocket> InboundUpgrade<TSocket> for Config
 where
     TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {

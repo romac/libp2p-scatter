@@ -1,41 +1,43 @@
-use crate::protocol::Message;
-use fnv::{FnvHashMap, FnvHashSet};
-use libp2p::swarm::{
-    ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, OneShotHandler, ToSwarm,
-};
-use libp2p::{Multiaddr, PeerId};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use fnv::{FnvHashMap, FnvHashSet};
+use libp2p::swarm::derive_prelude::FromSwarm;
+use libp2p::swarm::{
+    ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, OneShotHandler, ToSwarm,
+};
+use libp2p::{Multiaddr, PeerId};
+
+use crate::protocol::Message;
+
 mod length_prefixed;
 mod protocol;
 
-use libp2p::swarm::derive_prelude::FromSwarm;
-pub use protocol::{BroadcastConfig, Topic};
+pub use protocol::{Config, Topic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BroadcastEvent {
+pub enum Event {
     Subscribed(PeerId, Topic),
     Unsubscribed(PeerId, Topic),
     Received(PeerId, Topic, Arc<[u8]>),
 }
 
-type Handler = OneShotHandler<BroadcastConfig, Message, HandlerEvent>;
+type Handler = OneShotHandler<Config, Message, HandlerEvent>;
 
 #[derive(Default)]
-pub struct Broadcast {
-    config: BroadcastConfig,
+pub struct Behaviour {
+    config: Config,
     subscriptions: FnvHashSet<Topic>,
     peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
     topics: FnvHashMap<Topic, FnvHashSet<PeerId>>,
-    events: VecDeque<ToSwarm<BroadcastEvent, Message>>,
+    events: VecDeque<ToSwarm<Event, Message>>,
 }
 
-impl fmt::Debug for Broadcast {
+impl fmt::Debug for Behaviour {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Broadcast")
+        f.debug_struct("Behaviour")
             .field("config", &self.config)
             .field("subscriptions", &self.subscriptions)
             .field("peers", &self.peers)
@@ -44,8 +46,8 @@ impl fmt::Debug for Broadcast {
     }
 }
 
-impl Broadcast {
-    pub fn new(config: BroadcastConfig) -> Self {
+impl Behaviour {
+    pub fn new(config: Config) -> Self {
         Self {
             config,
             ..Default::default()
@@ -125,9 +127,9 @@ impl Broadcast {
     }
 }
 
-impl NetworkBehaviour for Broadcast {
+impl NetworkBehaviour for Behaviour {
     type ConnectionHandler = Handler;
-    type ToSwarm = BroadcastEvent;
+    type ToSwarm = Event;
 
     fn handle_established_inbound_connection(
         &mut self,
@@ -179,15 +181,15 @@ impl NetworkBehaviour for Broadcast {
                 let peers = self.topics.entry(topic).or_default();
                 self.peers.get_mut(&peer).unwrap().insert(topic);
                 peers.insert(peer);
-                BroadcastEvent::Subscribed(peer, topic)
+                Event::Subscribed(peer, topic)
             }
-            Rx(Broadcast(topic, msg)) => BroadcastEvent::Received(peer, topic, msg),
+            Rx(Broadcast(topic, msg)) => Event::Received(peer, topic, msg),
             Rx(Unsubscribe(topic)) => {
                 self.peers.get_mut(&peer).unwrap().remove(&topic);
                 if let Some(peers) = self.topics.get_mut(&topic) {
                     peers.remove(&peer);
                 }
-                BroadcastEvent::Unsubscribed(peer, topic)
+                Event::Unsubscribed(peer, topic)
             }
             Tx => {
                 return;
@@ -196,7 +198,7 @@ impl NetworkBehaviour for Broadcast {
         self.events.push_back(ToSwarm::GenerateEvent(ev));
     }
 
-    fn poll(&mut self, _: &mut Context) -> Poll<ToSwarm<BroadcastEvent, Message>> {
+    fn poll(&mut self, _: &mut Context) -> Poll<ToSwarm<Event, Message>> {
         if let Some(event) = self.events.pop_front() {
             Poll::Ready(event)
         } else {
@@ -234,8 +236,8 @@ mod tests {
 
     struct DummySwarm {
         peer_id: PeerId,
-        behaviour: Arc<Mutex<Broadcast>>,
-        connections: FnvHashMap<PeerId, Arc<Mutex<Broadcast>>>,
+        behaviour: Arc<Mutex<Behaviour>>,
+        connections: FnvHashMap<PeerId, Arc<Mutex<Behaviour>>>,
     }
 
     impl DummySwarm {
@@ -268,7 +270,7 @@ mod tests {
                 .insert(*self.peer_id(), self.behaviour.clone());
         }
 
-        fn next(&self) -> Option<BroadcastEvent> {
+        fn next(&self) -> Option<Event> {
             let waker = futures::task::noop_waker();
             let mut ctx = Context::from_waker(&waker);
             let mut me = self.behaviour.lock().unwrap();
@@ -321,27 +323,15 @@ mod tests {
         a.subscribe(topic);
         a.dial(&mut b);
         assert!(a.next().is_none());
-        assert_eq!(
-            b.next().unwrap(),
-            BroadcastEvent::Subscribed(*a.peer_id(), topic)
-        );
+        assert_eq!(b.next().unwrap(), Event::Subscribed(*a.peer_id(), topic));
         b.subscribe(topic);
         assert!(b.next().is_none());
-        assert_eq!(
-            a.next().unwrap(),
-            BroadcastEvent::Subscribed(*b.peer_id(), topic)
-        );
+        assert_eq!(a.next().unwrap(), Event::Subscribed(*b.peer_id(), topic));
         b.broadcast(&topic, msg.clone());
         assert!(b.next().is_none());
-        assert_eq!(
-            a.next().unwrap(),
-            BroadcastEvent::Received(*b.peer_id(), topic, msg)
-        );
+        assert_eq!(a.next().unwrap(), Event::Received(*b.peer_id(), topic, msg));
         a.unsubscribe(&topic);
         assert!(a.next().is_none());
-        assert_eq!(
-            b.next().unwrap(),
-            BroadcastEvent::Unsubscribed(*a.peer_id(), topic)
-        );
+        assert_eq!(b.next().unwrap(), Event::Unsubscribed(*a.peer_id(), topic));
     }
 }
