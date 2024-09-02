@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use fnv::{FnvHashMap, FnvHashSet};
 use libp2p::swarm::derive_prelude::FromSwarm;
 use libp2p::swarm::{
@@ -21,7 +21,7 @@ pub use protocol::{Config, Topic};
 pub enum Event {
     Subscribed(PeerId, Topic),
     Unsubscribed(PeerId, Topic),
-    Received(PeerId, Topic, Arc<[u8]>),
+    Received(PeerId, Topic, Bytes),
 }
 
 type Handler = OneShotHandler<Config, Message, HandlerEvent>;
@@ -92,7 +92,7 @@ impl Behaviour {
         }
     }
 
-    pub fn broadcast(&mut self, topic: &Topic, msg: Arc<[u8]>) {
+    pub fn broadcast(&mut self, topic: &Topic, msg: Bytes) {
         let msg = Message::Broadcast(*topic, msg);
         if let Some(peers) = self.topics.get(topic) {
             for peer in peers {
@@ -307,7 +307,7 @@ mod tests {
             me.unsubscribe(topic);
         }
 
-        fn broadcast(&self, topic: &Topic, msg: Arc<[u8]>) {
+        fn broadcast(&self, topic: &Topic, msg: Bytes) {
             let mut me = self.behaviour.lock().unwrap();
             me.broadcast(topic, msg);
         }
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_broadcast() {
         let topic = Topic::new(b"topic");
-        let msg = Arc::new(*b"msg");
+        let msg = Bytes::from_static(b"msg");
         let mut a = DummySwarm::new();
         let mut b = DummySwarm::new();
 

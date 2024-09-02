@@ -465,6 +465,7 @@ dependencies = [
 name = "libp2p-broadcast"
 version = "0.12.0"
 dependencies = [
+ "bytes",
  "fnv",
  "futures",
  "libp2p",

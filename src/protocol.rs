@@ -1,6 +1,6 @@
 use std::io::{Error, ErrorKind, Result};
-use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
@@ -45,7 +45,7 @@ impl AsRef<[u8]> for Topic {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Subscribe(Topic),
-    Broadcast(Topic, Arc<[u8]>),
+    Broadcast(Topic, Bytes),
     Unsubscribe(Topic),
 }
 
@@ -183,10 +183,10 @@ mod tests {
     fn test_roundtrip() {
         let topic = Topic::new(b"topic");
         let msgs = [
-            Message::Broadcast(Topic::new(b""), Arc::new(*b"")),
+            Message::Broadcast(Topic::new(b""), Bytes::from_static(b"")),
             Message::Subscribe(topic),
             Message::Unsubscribe(topic),
-            Message::Broadcast(topic, Arc::new(*b"content")),
+            Message::Broadcast(topic, Bytes::from_static(b"content")),
         ];
         for msg in &msgs {
             let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
