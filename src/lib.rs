@@ -9,12 +9,15 @@ use libp2p::swarm::{
     ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, OneShotHandler, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId};
+use prometheus_client::registry::Registry;
 
 use crate::protocol::Message;
 
 mod length_prefixed;
+mod metrics;
 mod protocol;
 
+pub use metrics::Metrics;
 pub use protocol::{Config, Topic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +36,7 @@ pub struct Behaviour {
     peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
     topics: FnvHashMap<Topic, FnvHashSet<PeerId>>,
     events: VecDeque<ToSwarm<Event, Message>>,
+    metrics: Option<Metrics>,
 }
 
 impl fmt::Debug for Behaviour {
@@ -50,6 +54,14 @@ impl Behaviour {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            ..Default::default()
+        }
+    }
+
+    pub fn new_with_metrics(config: Config, registry: &mut Registry) -> Self {
+        Self {
+            config,
+            metrics: Some(Metrics::new(registry)),
             ..Default::default()
         }
     }
@@ -76,6 +88,10 @@ impl Behaviour {
                 handler: NotifyHandler::Any,
             });
         }
+
+        if let Some(metrics) = &mut self.metrics {
+            metrics.subscribe(&topic);
+        }
     }
 
     pub fn unsubscribe(&mut self, topic: &Topic) {
@@ -90,6 +106,10 @@ impl Behaviour {
                 });
             }
         }
+
+        if let Some(metrics) = &mut self.metrics {
+            metrics.unsubscribe(topic);
+        }
     }
 
     pub fn broadcast(&mut self, topic: &Topic, msg: Bytes) {
@@ -102,6 +122,11 @@ impl Behaviour {
                     handler: NotifyHandler::Any,
                 });
             }
+        }
+
+        if let Some(metrics) = &mut self.metrics {
+            metrics.msg_sent(topic, msg.len());
+            metrics.register_published_message(topic);
         }
     }
 
@@ -181,13 +206,26 @@ impl NetworkBehaviour for Behaviour {
                 let peers = self.topics.entry(topic).or_default();
                 self.peers.get_mut(&peer).unwrap().insert(topic);
                 peers.insert(peer);
+                if let Some(metrics) = self.metrics.as_mut() {
+                    metrics.inc_topic_peers(&topic);
+                }
                 Event::Subscribed(peer, topic)
             }
-            Rx(Broadcast(topic, msg)) => Event::Received(peer, topic, msg),
+
+            Rx(Broadcast(topic, msg)) => {
+                if let Some(metrics) = self.metrics.as_mut() {
+                    metrics.msg_received(&topic, msg.len());
+                }
+                Event::Received(peer, topic, msg)
+            }
+
             Rx(Unsubscribe(topic)) => {
                 self.peers.get_mut(&peer).unwrap().remove(&topic);
                 if let Some(peers) = self.topics.get_mut(&topic) {
                     peers.remove(&peer);
+                }
+                if let Some(metrics) = self.metrics.as_mut() {
+                    metrics.dec_topic_peers(&topic);
                 }
                 Event::Unsubscribed(peer, topic)
             }

@@ -1,9 +1,11 @@
+use std::fmt;
 use std::io::{Error, ErrorKind, Result};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+use prometheus_client::encoding::{EncodeLabelSet, LabelSetEncoder};
 
 use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
 
@@ -25,6 +27,20 @@ impl Topic {
             len: topic.len() as _,
             bytes,
         }
+    }
+}
+
+impl EncodeLabelSet for Topic {
+    fn encode(&self, mut encoder: LabelSetEncoder) -> fmt::Result {
+        use prometheus_client::encoding::{EncodeLabelKey, EncodeLabelValue};
+
+        let mut label_encoder = encoder.encode_label();
+        let mut key_encoder = label_encoder.encode_label_key()?;
+        EncodeLabelKey::encode(&"topic", &mut key_encoder)?;
+        let mut value_encoder = key_encoder.encode_label_value()?;
+        let value = String::from_utf8_lossy(self.as_ref());
+        EncodeLabelValue::encode(&value, &mut value_encoder)?;
+        value_encoder.finish()
     }
 }
 
@@ -50,7 +66,7 @@ pub enum Message {
 }
 
 impl Message {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
             return Err(Error::new(ErrorKind::InvalidData, "empty message"));
         }
@@ -75,28 +91,35 @@ impl Message {
         })
     }
 
-    fn to_bytes(&self) -> Vec<u8> {
-        use Message::*;
+    pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            Subscribe(topic) => {
+            Message::Subscribe(topic) => {
                 let mut buf = Vec::with_capacity(topic.len() + 1);
                 buf.push((topic.len() as u8) << 2);
                 buf.extend_from_slice(topic);
                 buf
             }
-            Unsubscribe(topic) => {
+            Message::Unsubscribe(topic) => {
                 let mut buf = Vec::with_capacity(topic.len() + 1);
                 buf.push((topic.len() as u8) << 2 | 0b10);
                 buf.extend_from_slice(topic);
                 buf
             }
-            Broadcast(topic, msg) => {
+            Message::Broadcast(topic, msg) => {
                 let mut buf = Vec::with_capacity(topic.len() + msg.len() + 1);
                 buf.push((topic.len() as u8) << 2 | 0b01);
                 buf.extend_from_slice(topic);
                 buf.extend_from_slice(msg);
                 buf
             }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Message::Subscribe(topic) => 1 + topic.len(),
+            Message::Unsubscribe(topic) => 1 + topic.len(),
+            Message::Broadcast(topic, msg) => 1 + topic.len() + msg.len(),
         }
     }
 }
