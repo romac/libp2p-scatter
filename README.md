@@ -1,8 +1,8 @@
 [![API Documentation][docs-image]][docs-link]
 [![Build Status][build-image]][build-link]
 ![Rust Stable][rustc-image]
-[Apache 2.0 Licensed][license-image]
-[MIT Licensed][license-image]
+![Apache 2.0 Licensed][license-apache-image]
+![MIT Licensed][license-mit-image]
 
 # libp2p-scatter
 
@@ -20,4 +20,4 @@ MIT OR Apache-2.0
 [docs-link]: https://docs.rs/libp2p-scatter
 [license-apache-image]: https://img.shields.io/badge/license-Apache_2.0-blue.svg
 [license-mit-image]: https://img.shields.io/badge/license-MIT-blue.svg
-[rustc-image]: https://img.shields.io/badge/rustc-stable-blue.svg
+[rustc-image]: https://img.shields.io/badge/rustc-stable-orange.svg
