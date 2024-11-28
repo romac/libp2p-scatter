@@ -474,18 +474,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libp2p-broadcast"
-version = "0.12.0"
-dependencies = [
- "bytes",
- "fnv",
- "futures",
- "libp2p",
- "prometheus-client",
- "unsigned-varint 0.8.0",
-]
-
-[[package]]
 name = "libp2p-connection-limits"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -541,6 +529,18 @@ dependencies = [
  "thiserror",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "libp2p-scatter"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fnv",
+ "futures",
+ "libp2p",
+ "prometheus-client",
+ "unsigned-varint 0.8.0",
 ]
 
 [[package]]

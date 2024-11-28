@@ -1,15 +1,15 @@
 [package]
-name = "libp2p-broadcast"
-version = "0.12.0"
-authors = ["David Craven <david@craven.ch>", "Actyx AG"]
+name = "libp2p-scatter"
+version = "0.1.0"
+authors = ["David Craven <david@craven.ch>", "Actyx AG", "Romain Ruetschi <github@romac.me>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
 description = "broadcast messages to connected peers"
-repository = "https://github.com/ipfs-rust/libp2p-broadcast"
+repository = "https://github.com/romac/libp2p-scatter"
 
 [dependencies]
 bytes = "1"
-fnv = "1.0"
+fnv = "1"
 futures = "0.3"
 libp2p = "0.54"
 unsigned-varint = "0.8"
