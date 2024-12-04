@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-scatter"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["David Craven <david@craven.ch>", "Actyx AG", "Romain Ruetschi <github@romac.me>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
@@ -14,4 +14,4 @@ futures = "0.3"
 libp2p = "0.54"
 unsigned-varint = "0.8"
 prometheus-client = "0.22"
-tracing = "0.1.41"
+tracing = "0.1"
