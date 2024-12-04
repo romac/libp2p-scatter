@@ -6,7 +6,8 @@ use bytes::Bytes;
 use fnv::{FnvHashMap, FnvHashSet};
 use libp2p::swarm::derive_prelude::FromSwarm;
 use libp2p::swarm::{
-    ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, OneShotHandler, ToSwarm,
+    CloseConnection, ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler,
+    OneShotHandler, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId};
 use prometheus_client::registry::Registry;
@@ -196,15 +197,15 @@ impl NetworkBehaviour for Behaviour {
     fn on_connection_handler_event(
         &mut self,
         peer: PeerId,
-        _: ConnectionId,
+        connection_id: ConnectionId,
         msg: <Self::ConnectionHandler as ConnectionHandler>::ToBehaviour,
     ) {
         use HandlerEvent::*;
         use Message::*;
-        let ev = match msg.unwrap() {
-            Rx(Subscribe(topic)) => {
+        let ev = match msg {
+            Ok(Rx(Subscribe(topic))) => {
                 let peers = self.topics.entry(topic).or_default();
-                self.peers.get_mut(&peer).unwrap().insert(topic);
+                self.peers.entry(peer).or_default().insert(topic);
                 peers.insert(peer);
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.inc_topic_peers(&topic);
@@ -212,15 +213,15 @@ impl NetworkBehaviour for Behaviour {
                 Event::Subscribed(peer, topic)
             }
 
-            Rx(Broadcast(topic, msg)) => {
+            Ok(Rx(Broadcast(topic, msg))) => {
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.msg_received(&topic, msg.len());
                 }
                 Event::Received(peer, topic, msg)
             }
 
-            Rx(Unsubscribe(topic)) => {
-                self.peers.get_mut(&peer).unwrap().remove(&topic);
+            Ok(Rx(Unsubscribe(topic))) => {
+                self.peers.entry(peer).or_default().remove(&topic);
                 if let Some(peers) = self.topics.get_mut(&topic) {
                     peers.remove(&peer);
                 }
@@ -229,7 +230,19 @@ impl NetworkBehaviour for Behaviour {
                 }
                 Event::Unsubscribed(peer, topic)
             }
-            Tx => {
+
+            Ok(Tx) => {
+                return;
+            }
+
+            Err(e) => {
+                tracing::debug!("Failed to broadcast message: {e}");
+
+                self.events.push_back(ToSwarm::CloseConnection {
+                    peer_id: peer,
+                    connection: CloseConnection::One(connection_id),
+                });
+
                 return;
             }
         };
