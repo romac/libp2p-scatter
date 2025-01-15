@@ -584,9 +584,9 @@ checksum = "09d6582e104315a817dff97f75133544b2e094ee22447d2acf4a74e189ba06fc"
 
 [[package]]
 name = "libp2p"
-version = "0.54.1"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbe80f9c7e00526cd6b838075b9c171919404a4732cb2fa8ece0a093223bfc4"
+checksum = "b72dc443ddd0254cb49a794ed6b6728400ee446a0f7ab4a07d0209ee98de20e9"
 dependencies = [
  "bytes",
  "either",
@@ -601,38 +601,36 @@ dependencies = [
  "multiaddr",
  "pin-project",
  "rw-stream-sink",
- "thiserror",
+ "thiserror 2.0.11",
 ]
 
 [[package]]
 name = "libp2p-allow-block-list"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1027ccf8d70320ed77e984f273bc8ce952f623762cb9bf2d126df73caef8041"
+checksum = "38944b7cb981cc93f2f0fb411ff82d0e983bd226fbcc8d559639a3a73236568b"
 dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "libp2p-swarm",
- "void",
 ]
 
 [[package]]
 name = "libp2p-connection-limits"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d003540ee8baef0d254f7b6bfd79bac3ddf774662ca0abf69186d517ef82ad8"
+checksum = "efe9323175a17caa8a2ed4feaf8a548eeef5e0b72d03840a0eab4bcb0210ce1c"
 dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "libp2p-swarm",
- "void",
 ]
 
 [[package]]
 name = "libp2p-core"
-version = "0.42.0"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a61f26c83ed111104cd820fe9bc3aaabbac5f1652a1d213ed6e900b7918a1298"
+checksum = "193c75710ba43f7504ad8f58a62ca0615b1d7e572cb0f1780bc607252c39e9ef"
 dependencies = [
  "either",
  "fnv",
@@ -648,11 +646,9 @@ dependencies = [
  "quick-protobuf",
  "rand",
  "rw-stream-sink",
- "smallvec",
- "thiserror",
+ "thiserror 2.0.11",
  "tracing",
  "unsigned-varint 0.8.0",
- "void",
  "web-time",
 ]
 
@@ -669,14 +665,14 @@ dependencies = [
  "quick-protobuf",
  "rand",
  "sha2",
- "thiserror",
+ "thiserror 1.0.69",
  "tracing",
  "zeroize",
 ]
 
 [[package]]
 name = "libp2p-scatter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "fnv",
@@ -689,9 +685,9 @@ dependencies = [
 
 [[package]]
 name = "libp2p-swarm"
-version = "0.45.1"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7dd6741793d2c1fb2088f67f82cf07261f25272ebe3c0b0c311e0c6b50e851a"
+checksum = "803399b4b6f68adb85e63ab573ac568154b193e9a640f03e0f2890eabbcb37f8"
 dependencies = [
  "either",
  "fnv",
@@ -705,7 +701,6 @@ dependencies = [
  "rand",
  "smallvec",
  "tracing",
- "void",
  "web-time",
 ]
 
@@ -1139,7 +1134,16 @@ version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d452f284b73e6d76dd36758a0c8684b1d5be31f92b89d07fd5822175732206fc"
+dependencies = [
+ "thiserror-impl 2.0.11",
 ]
 
 [[package]]
@@ -1147,6 +1151,17 @@ name = "thiserror-impl"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26afc1baea8a989337eeb52b6e72a039780ce45c3edfcc9c5b9d112feeb173c2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1261,12 +1276,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "void"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
 name = "wasi"
