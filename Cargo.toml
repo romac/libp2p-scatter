@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-scatter"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["David Craven <david@craven.ch>", "Actyx AG", "Romain Ruetschi <github@romac.me>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
