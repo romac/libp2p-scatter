@@ -1,19 +1,3 @@
-[![API Documentation][docs-image]][docs-link]
-[![Build Status][build-image]][build-link]
-[![codecov][codecov-image]][codecov-link]
-![Rust Stable][rustc-image]
-![Apache 2.0 Licensed][license-apache-image]
-![MIT Licensed][license-mit-image]
-
-# libp2p-scatter
-
-Implementation of a `rust-libp2p` protocol for broadcast messages to connected peers.
-
-Originally forked from https://github.com/cloudpeers/libp2p-broadcast.
-
-## Example
-
-```rust
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, identity, noise, tcp, yamux};
@@ -56,14 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Listen on a local address
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
+    let topic = scatter::Topic::new(b"my-topic");
+
     if let Some(addr) = connect_addr {
         swarm.dial(addr.clone())?;
         println!("Dialed {addr}");
     }
 
     // Subscribe to a topic
-    let topic = scatter::Topic::new(b"my-topic");
     swarm.behaviour_mut().subscribe(topic);
+    println!("Subscribed to topic: {topic}");
 
     // Event loop
     loop {
@@ -71,8 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SwarmEvent::Behaviour(scatter::Event::Subscribed(peer_id, topic)) => {
                 println!("Peer {peer_id} subscribed to topic: {topic}");
 
-                // Broadcast a message when a peer subscribes
-                let message = Bytes::from("Hello, peer!");
+                let message = Bytes::from(format!("A new peer has joined: {peer_id}!"));
                 swarm.behaviour_mut().broadcast(&topic, message);
             }
             SwarmEvent::Behaviour(scatter::Event::Unsubscribed(peer_id, topic)) => {
@@ -91,18 +76,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
-```
-
-## License
-
-MIT OR Apache-2.0
-
-[build-image]: https://github.com/romac/libp2p-scatter/workflows/Rust/badge.svg
-[build-link]: https://github.com/romac/libp2p-scatter/actions?query=workflow%3ARust
-[docs-image]: https://docs.rs/libp2p-scatter/badge.svg
-[docs-link]: https://docs.rs/libp2p-scatter
-[license-apache-image]: https://img.shields.io/badge/license-Apache_2.0-blue.svg
-[license-mit-image]: https://img.shields.io/badge/license-MIT-blue.svg
-[rustc-image]: https://img.shields.io/badge/rustc-stable-orange.svg
-[codecov-image]: https://codecov.io/github/romac/libp2p-scatter/branch/main/graph/badge.svg?token=EQNU0W2JJ0
-[codecov-link]: https://codecov.io/github/romac/libp2p-scatter
