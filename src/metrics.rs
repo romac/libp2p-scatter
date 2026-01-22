@@ -140,3 +140,192 @@ impl Metrics {
             .inc_by(bytes as u64);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_metrics() -> Metrics {
+        let mut registry = Registry::default();
+        Metrics::new(&mut registry)
+    }
+
+    // ==================== Subscription Status Tests ====================
+
+    #[test]
+    fn test_subscribe_sets_status() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.subscribe(&topic);
+
+        let status = metrics.topic_subscription_status.get_or_create(&topic);
+        assert_eq!(status.get(), 1);
+    }
+
+    #[test]
+    fn test_unsubscribe_clears_status() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.subscribe(&topic);
+        metrics.unsubscribe(&topic);
+
+        let status = metrics.topic_subscription_status.get_or_create(&topic);
+        assert_eq!(status.get(), 0);
+    }
+
+    #[test]
+    fn test_subscribe_unsubscribe_cycle() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        // Subscribe
+        metrics.subscribe(&topic);
+        assert_eq!(
+            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            1
+        );
+
+        // Unsubscribe
+        metrics.unsubscribe(&topic);
+        assert_eq!(
+            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            0
+        );
+
+        // Re-subscribe
+        metrics.subscribe(&topic);
+        assert_eq!(
+            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            1
+        );
+    }
+
+    // ==================== Peer Count Tests ====================
+
+    #[test]
+    fn test_inc_topic_peers() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.inc_topic_peers(&topic);
+        metrics.inc_topic_peers(&topic);
+        metrics.inc_topic_peers(&topic);
+
+        let count = metrics.topic_peers_count.get_or_create(&topic);
+        assert_eq!(count.get(), 3);
+    }
+
+    #[test]
+    fn test_dec_topic_peers() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.inc_topic_peers(&topic);
+        metrics.inc_topic_peers(&topic);
+        metrics.dec_topic_peers(&topic);
+
+        let count = metrics.topic_peers_count.get_or_create(&topic);
+        assert_eq!(count.get(), 1);
+    }
+
+    // ==================== Message Sent Tests ====================
+
+    #[test]
+    fn test_msg_sent_counts() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.msg_sent(&topic, 100);
+        metrics.msg_sent(&topic, 200);
+
+        let count = metrics.topic_msg_sent_counts.get_or_create(&topic);
+        assert_eq!(count.get(), 2);
+
+        let bytes = metrics.topic_msg_sent_bytes.get_or_create(&topic);
+        assert_eq!(bytes.get(), 300);
+    }
+
+    #[test]
+    fn test_register_published_message() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.register_published_message(&topic);
+        metrics.register_published_message(&topic);
+
+        let count = metrics.topic_msg_published.get_or_create(&topic);
+        assert_eq!(count.get(), 2);
+    }
+
+    // ==================== Message Received Tests ====================
+
+    #[test]
+    fn test_msg_received_counts() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.msg_received(&topic, 50);
+        metrics.msg_received(&topic, 150);
+        metrics.msg_received(&topic, 100);
+
+        let count = metrics.topic_msg_recv_counts.get_or_create(&topic);
+        assert_eq!(count.get(), 3);
+
+        let bytes = metrics.topic_msg_recv_bytes.get_or_create(&topic);
+        assert_eq!(bytes.get(), 300);
+    }
+
+    // ==================== Multiple Topics Tests ====================
+
+    #[test]
+    fn test_multiple_topics_independent() {
+        let mut metrics = make_metrics();
+        let topic1 = Topic::new(b"topic1");
+        let topic2 = Topic::new(b"topic2");
+
+        metrics.subscribe(&topic1);
+        metrics.msg_sent(&topic1, 100);
+        metrics.inc_topic_peers(&topic1);
+
+        metrics.subscribe(&topic2);
+        metrics.msg_sent(&topic2, 200);
+        metrics.inc_topic_peers(&topic2);
+        metrics.inc_topic_peers(&topic2);
+
+        // Verify topic1
+        assert_eq!(
+            metrics.topic_msg_sent_bytes.get_or_create(&topic1).get(),
+            100
+        );
+        assert_eq!(metrics.topic_peers_count.get_or_create(&topic1).get(), 1);
+
+        // Verify topic2
+        assert_eq!(
+            metrics.topic_msg_sent_bytes.get_or_create(&topic2).get(),
+            200
+        );
+        assert_eq!(metrics.topic_peers_count.get_or_create(&topic2).get(), 2);
+    }
+
+    // ==================== Topic Registration Tests ====================
+
+    #[test]
+    fn test_register_topic_idempotent() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        // Multiple operations should not cause issues
+        metrics.subscribe(&topic);
+        metrics.subscribe(&topic);
+        metrics.unsubscribe(&topic);
+        metrics.subscribe(&topic);
+
+        // Should still work correctly
+        assert_eq!(
+            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            1
+        );
+    }
+}

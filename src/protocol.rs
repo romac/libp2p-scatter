@@ -202,6 +202,53 @@ where
 mod tests {
     use super::*;
 
+    // ==================== Topic Tests ====================
+
+    #[test]
+    fn test_topic_empty() {
+        let topic = Topic::new(b"");
+        assert_eq!(topic.len(), 0);
+        assert_eq!(topic.as_ref(), b"");
+    }
+
+    #[test]
+    fn test_topic_max_length() {
+        // Note: Wire format uses 6 bits for topic length, so max is 63 bytes
+        // Topic::MAX_TOPIC_LENGTH is 64 for storage, but wire max is 63
+        let data = [b'x'; 63];
+        let topic = Topic::new(&data);
+        assert_eq!(topic.len(), 63);
+        assert_eq!(topic.as_ref(), &data[..]);
+    }
+
+    #[test]
+    fn test_topic_various_lengths() {
+        for len in [1, 16, 32, 62, 63] {
+            let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let topic = Topic::new(&data);
+            assert_eq!(topic.len(), len);
+            assert_eq!(topic.as_ref(), &data[..]);
+        }
+    }
+
+    #[test]
+    fn test_topic_equality() {
+        let t1 = Topic::new(b"hello");
+        let t2 = Topic::new(b"hello");
+        let t3 = Topic::new(b"world");
+        assert_eq!(t1, t2);
+        assert_ne!(t1, t3);
+    }
+
+    #[test]
+    fn test_topic_ordering() {
+        let t1 = Topic::new(b"aaa");
+        let t2 = Topic::new(b"bbb");
+        assert!(t1 < t2);
+    }
+
+    // ==================== Message Roundtrip Tests ====================
+
     #[test]
     fn test_roundtrip() {
         let topic = Topic::new(b"topic");
@@ -218,9 +265,146 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_empty_topic() {
+        let topic = Topic::new(b"");
+        let msgs = [
+            Message::Subscribe(topic),
+            Message::Unsubscribe(topic),
+            Message::Broadcast(topic, Bytes::from_static(b"payload")),
+        ];
+        for msg in &msgs {
+            let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+            assert_eq!(msg, &msg2);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_max_topic() {
+        // Wire format uses 6 bits for topic length, so max is 63 bytes
+        let data = [b'T'; 63];
+        let topic = Topic::new(&data);
+        let msgs = [
+            Message::Subscribe(topic),
+            Message::Unsubscribe(topic),
+            Message::Broadcast(topic, Bytes::from_static(b"data")),
+        ];
+        for msg in &msgs {
+            let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+            assert_eq!(msg, &msg2);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_empty_payload() {
+        let topic = Topic::new(b"topic");
+        let msg = Message::Broadcast(topic, Bytes::new());
+        let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn test_roundtrip_large_payload() {
+        let topic = Topic::new(b"topic");
+        let payload = Bytes::from(vec![0xAB; 10000]);
+        let msg = Message::Broadcast(topic, payload);
+        let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    // ==================== Message Length Tests ====================
+
+    #[test]
+    fn test_message_len() {
+        let topic = Topic::new(b"hello"); // 5 bytes
+        assert_eq!(Message::Subscribe(topic).len(), 6); // 1 header + 5 topic
+        assert_eq!(Message::Unsubscribe(topic).len(), 6);
+        assert_eq!(
+            Message::Broadcast(topic, Bytes::from_static(b"world")).len(),
+            11
+        ); // 1 + 5 + 5
+    }
+
+    // ==================== Error Condition Tests ====================
+
+    #[test]
+    fn test_empty_message_error() {
+        let result = Message::from_bytes(&[]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_truncated_topic_error() {
+        // Header says topic is 5 bytes but only 2 bytes follow
+        let bytes = [0b0001_0100, b'a', b'b']; // topic_len = 5, actual = 2
+        let result = Message::from_bytes(&bytes);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_invalid_message_type_error() {
+        // Type bits 0b11 are invalid
+        let bytes = [0b0000_0011]; // topic_len = 0, type = 0b11
+        let result = Message::from_bytes(&bytes);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
     #[should_panic]
     fn test_invalid_message() {
         let out_of_range = [0b0000_0100];
         Message::from_bytes(&out_of_range).unwrap();
+    }
+
+    // ==================== Wire Format Tests ====================
+
+    #[test]
+    fn test_subscribe_wire_format() {
+        let topic = Topic::new(b"test");
+        let msg = Message::Subscribe(topic);
+        let bytes = msg.to_bytes();
+
+        // Header: topic_len (4) << 2 | type (0b00) = 0b0001_0000 = 16
+        assert_eq!(bytes[0], 16);
+        assert_eq!(&bytes[1..], b"test");
+    }
+
+    #[test]
+    fn test_unsubscribe_wire_format() {
+        let topic = Topic::new(b"test");
+        let msg = Message::Unsubscribe(topic);
+        let bytes = msg.to_bytes();
+
+        // Header: topic_len (4) << 2 | type (0b10) = 0b0001_0010 = 18
+        assert_eq!(bytes[0], 18);
+        assert_eq!(&bytes[1..], b"test");
+    }
+
+    #[test]
+    fn test_broadcast_wire_format() {
+        let topic = Topic::new(b"test");
+        let msg = Message::Broadcast(topic, Bytes::from_static(b"data"));
+        let bytes = msg.to_bytes();
+
+        // Header: topic_len (4) << 2 | type (0b01) = 0b0001_0001 = 17
+        assert_eq!(bytes[0], 17);
+        assert_eq!(&bytes[1..5], b"test");
+        assert_eq!(&bytes[5..], b"data");
+    }
+
+    // ==================== Config Tests ====================
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert_eq!(config.max_buf_size, 4 * 1024 * 1024); // 4 MiB
+    }
+
+    #[test]
+    fn test_config_builder() {
+        let config = Config::default().max_buf_size(1024);
+        assert_eq!(config.max_buf_size, 1024);
     }
 }
