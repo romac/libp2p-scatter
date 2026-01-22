@@ -1,13 +1,6 @@
-use std::io::{Error, Result};
-
 use bytes::Bytes;
-use futures::future::BoxFuture;
-use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 
-use crate::codec::{Codec, read_length_prefixed, write_length_prefixed};
-
-const PROTOCOL_INFO: &str = "/ax/broadcast/1.0.0";
+use crate::codec::Codec;
 
 /// A topic identifier for the broadcast protocol.
 ///
@@ -124,61 +117,6 @@ impl Default for Config {
         Self {
             max_buf_size: 1024 * 1024 * 4, // 4 MiB
         }
-    }
-}
-
-impl UpgradeInfo for Config {
-    type Info = &'static str;
-    type InfoIter = std::iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        std::iter::once(PROTOCOL_INFO)
-    }
-}
-
-impl<TSocket> InboundUpgrade<TSocket> for Config
-where
-    TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    type Output = Message;
-    type Error = Error;
-    type Future = BoxFuture<'static, Result<Self::Output>>;
-
-    fn upgrade_inbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
-        Box::pin(async move {
-            let packet = read_length_prefixed(&mut socket, self.max_buf_size).await?;
-            socket.close().await?;
-            let request = Codec::decode(&packet)?;
-            Ok(request)
-        })
-    }
-}
-
-impl UpgradeInfo for Message {
-    type Info = &'static str;
-    type InfoIter = std::iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        std::iter::once(PROTOCOL_INFO)
-    }
-}
-
-impl<TSocket> OutboundUpgrade<TSocket> for Message
-where
-    TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    type Output = ();
-    type Error = Error;
-    type Future = BoxFuture<'static, Result<Self::Output>>;
-
-    fn upgrade_outbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
-        Box::pin(async move {
-            let mut buf = Vec::with_capacity(Codec::encoded_len(&self));
-            Codec::encode(&self, &mut buf)?;
-            write_length_prefixed(&mut socket, buf).await?;
-            socket.close().await?;
-            Ok(())
-        })
     }
 }
 
