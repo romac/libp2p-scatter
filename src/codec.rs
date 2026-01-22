@@ -11,20 +11,18 @@ use crate::protocol::{Message, Topic};
 /// necessary in order to avoid DoS attacks where the remote sends us a message of several
 /// gigabytes.
 ///
-/// > **Note**: Assumes that a variable-length prefix indicates the length of the message. This is
-/// >           compatible with what [`write_length_prefixed`] does.
-pub async fn read_length_prefixed(
-    socket: &mut (impl AsyncRead + Unpin),
-    max_size: usize,
-) -> io::Result<Vec<u8>> {
+/// # Note
+/// Assumes that a variable-length prefix indicates the length of the message.
+/// This is compatible with what [`write_length_prefixed`] does.
+pub async fn read_length_prefixed<S>(socket: &mut S, max_size: usize) -> io::Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
     let len = read_varint(socket).await?;
     if len > max_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "Received data size ({} bytes) exceeds maximum ({} bytes)",
-                len, max_size
-            ),
+            format!("Received data size ({len} bytes) exceeds maximum ({max_size} bytes)"),
         ));
     }
 
@@ -36,55 +34,36 @@ pub async fn read_length_prefixed(
 
 /// Reads a variable-length integer from the `socket`.
 ///
-/// As a special exception, if the `socket` is empty and EOFs right at the beginning, then we
-/// return `Ok(0)`.
-///
-/// > **Note**: This function reads bytes one by one from the `socket`. It is therefore encouraged
-/// >           to use some sort of buffering mechanism.
-pub async fn read_varint(socket: &mut (impl AsyncRead + Unpin)) -> Result<usize, io::Error> {
-    let mut buffer = unsigned_varint::encode::usize_buffer();
-    let mut buffer_len = 0;
-
-    loop {
-        match socket.read(&mut buffer[buffer_len..buffer_len + 1]).await? {
-            0 => {
-                // Reaching EOF before finishing to read the length is an error, unless the EOF is
-                // at the very beginning of the substream, in which case we assume that the data is
-                // empty.
-                if buffer_len == 0 {
-                    return Ok(0);
-                } else {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
-                }
+/// # Note
+/// This function reads bytes one by one from the `socket`.
+/// It is therefore encouraged to use some sort of buffering mechanism.
+pub async fn read_varint<S>(socket: &mut S) -> Result<usize, io::Error>
+where
+    S: AsyncRead + Unpin,
+{
+    unsigned_varint::aio::read_usize(socket)
+        .await
+        .map_err(|e| match e {
+            unsigned_varint::io::ReadError::Io(e) => e,
+            unsigned_varint::io::ReadError::Decode(e) => {
+                io::Error::new(io::ErrorKind::InvalidData, e)
             }
-            n => debug_assert_eq!(n, 1),
-        }
-
-        buffer_len += 1;
-
-        match unsigned_varint::decode::usize(&buffer[..buffer_len]) {
-            Ok((len, _)) => return Ok(len),
-            Err(unsigned_varint::decode::Error::Overflow) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "overflow in variable-length integer",
-                ));
-            }
-            // TODO: why do we have a `__Nonexhaustive` variant in the error? I don't know how to process it
-            // Err(unsigned_varint::decode::Error::Insufficient) => {}
-            Err(_) => {}
-        }
-    }
+            _ => io::Error::new(io::ErrorKind::InvalidData, "invalid varint"),
+        })
 }
 
 /// Writes a message to the given socket with a length prefix appended to it. Also flushes the socket.
 ///
-/// > **Note**: Prepends a variable-length prefix indicate the length of the message. This is
-/// >           compatible with what [`read_length_prefixed`] expects.
-pub async fn write_length_prefixed(
-    socket: &mut (impl AsyncWrite + Unpin),
+/// # Note
+/// Prepends a variable-length prefix indicate the length of the message.
+/// This is compatible with what [`read_length_prefixed`] expects.
+pub async fn write_length_prefixed<A>(
+    socket: &mut A,
     data: impl AsRef<[u8]>,
-) -> Result<(), io::Error> {
+) -> Result<(), io::Error>
+where
+    A: AsyncWrite + Unpin,
+{
     write_varint(socket, data.as_ref().len()).await?;
     socket.write_all(data.as_ref()).await?;
     socket.flush().await?;
@@ -94,11 +73,12 @@ pub async fn write_length_prefixed(
 
 /// Writes a variable-length integer to the `socket`.
 ///
-/// > **Note**: Does **NOT** flush the socket.
-pub async fn write_varint(
-    socket: &mut (impl AsyncWrite + Unpin),
-    len: usize,
-) -> Result<(), io::Error> {
+/// # Note
+/// Does **NOT** flush the socket.
+pub async fn write_varint<A>(socket: &mut A, len: usize) -> Result<(), io::Error>
+where
+    A: AsyncWrite + Unpin,
+{
     let mut len_data = unsigned_varint::encode::usize_buffer();
     let encoded_len = unsigned_varint::encode::usize(len, &mut len_data).len();
     socket.write_all(&len_data[..encoded_len]).await?;
@@ -139,7 +119,6 @@ impl Codec {
     /// Decodes a message from a byte slice.
     ///
     /// # Errors
-    ///
     /// Returns an error if:
     /// - The input is empty
     /// - The topic length in the header exceeds the available bytes
@@ -148,14 +127,18 @@ impl Codec {
         if bytes.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "empty message"));
         }
+
         let topic_len = (bytes[0] >> 2) as usize;
+
         if bytes.len() < topic_len + 1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "topic length out of range",
             ));
         }
+
         let topic = Topic::new(&bytes[1..topic_len + 1]);
+
         match bytes[0] & Self::TAG_MASK {
             Self::TAG_SUBSCRIBE => Ok(Message::Subscribe(topic)),
             Self::TAG_UNSUBSCRIBE => Ok(Message::Unsubscribe(topic)),
@@ -173,20 +156,25 @@ impl Codec {
     /// avoiding the need to allocate a temporary buffer.
     ///
     /// # Errors
-    ///
     /// Returns an error if writing to the writer fails.
-    pub fn encode<W: Write>(message: &Message, writer: &mut W) -> io::Result<()> {
+    pub fn encode<W>(message: &Message, writer: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
         match message {
             Message::Subscribe(topic) => {
-                writer.write_all(&[(topic.len() as u8) << 2 | Self::TAG_SUBSCRIBE])?;
+                let len = (topic.len() as u8) << 2;
+                writer.write_all(&[len | Self::TAG_SUBSCRIBE])?;
                 writer.write_all(topic.as_ref())?;
             }
             Message::Unsubscribe(topic) => {
-                writer.write_all(&[(topic.len() as u8) << 2 | Self::TAG_UNSUBSCRIBE])?;
+                let len = (topic.len() as u8) << 2;
+                writer.write_all(&[len | Self::TAG_UNSUBSCRIBE])?;
                 writer.write_all(topic.as_ref())?;
             }
             Message::Broadcast(topic, payload) => {
-                writer.write_all(&[(topic.len() as u8) << 2 | Self::TAG_BROADCAST])?;
+                let len = (topic.len() as u8) << 2;
+                writer.write_all(&[len | Self::TAG_BROADCAST])?;
                 writer.write_all(topic.as_ref())?;
                 writer.write_all(payload)?;
             }
@@ -345,13 +333,13 @@ mod tests {
     }
 
     #[test]
-    fn test_read_empty_stream_returns_empty() {
+    fn test_read_empty_stream_returns_eof() {
         block_on(async {
             let mut cursor = Cursor::new(Vec::<u8>::new());
-            let result = read_length_prefixed(&mut cursor, 1024).await.unwrap();
+            let result = read_length_prefixed(&mut cursor, 1024).await;
 
-            // Empty stream at start returns empty vec (varint reads 0)
-            assert!(result.is_empty());
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
         });
     }
 

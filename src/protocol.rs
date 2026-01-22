@@ -92,6 +92,15 @@ pub enum Message {
 }
 
 impl Message {
+    /// Returns the topic associated with this message.
+    pub fn topic(&self) -> &Topic {
+        match self {
+            Self::Subscribe(topic) => topic,
+            Self::Broadcast(topic, _) => topic,
+            Self::Unsubscribe(topic) => topic,
+        }
+    }
+
     /// Returns the encoded size of this message in bytes.
     pub fn len(&self) -> usize {
         Codec::encoded_len(self)

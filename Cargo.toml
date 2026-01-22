@@ -15,7 +15,7 @@ bytes = "1"
 fnv = "1"
 futures = "0.3"
 libp2p = "0.56"
-unsigned-varint = "0.8"
+unsigned-varint = { version = "0.8", features = ["futures"] }
 tracing = "0.1"
 prometheus-client = { version = "0.23.1", optional = true }
 
