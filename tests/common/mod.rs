@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::{noise, tcp, yamux, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
 use libp2p_scatter::{Behaviour, Config, Event};
 use tokio::time::timeout;
 
@@ -479,12 +479,11 @@ impl TestNetwork {
                 for (idx, node) in self.nodes.iter_mut().enumerate() {
                     while let Some(event) = node.swarm.next().now_or_never().flatten() {
                         tracing::debug!(node = idx, ?event, "Network event");
-                        if idx == node_index {
-                            if let SwarmEvent::Behaviour(e) = event {
-                                if predicate(&e) {
-                                    return e;
-                                }
-                            }
+                        if idx == node_index
+                            && let SwarmEvent::Behaviour(e) = event
+                            && predicate(&e)
+                        {
+                            return e;
                         }
                     }
                 }

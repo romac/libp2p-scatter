@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::io;
 use std::task::{Context, Poll};
 
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use libp2p::core::upgrade::ReadyUpgrade;
 use libp2p::swarm::handler::{
     ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,

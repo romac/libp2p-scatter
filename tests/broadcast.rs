@@ -170,10 +170,10 @@ async fn test_multiple_broadcasts_in_sequence() {
     let received: Vec<Bytes> = events
         .iter()
         .filter_map(|(idx, e)| {
-            if *idx == 1 {
-                if let Event::Received(_, _, msg) = e {
-                    return Some(msg.clone());
-                }
+            if *idx == 1
+                && let Event::Received(_, _, msg) = e
+            {
+                return Some(msg.clone());
             }
             None
         })
