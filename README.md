@@ -7,9 +7,9 @@
 
 # libp2p-scatter
 
-Broadcast messages to connected peers.
+Implementation of a `rust-libp2p` protocol for broadcast messages to connected peers.
 
-Forked from https://github.com/cloudpeers/libp2p-broadcast.
+Originally forked from https://github.com/cloudpeers/libp2p-broadcast.
 
 ## License
 
