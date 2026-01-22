@@ -17,7 +17,7 @@ use libp2p::swarm::handler::{
 use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, StreamProtocol, SubstreamProtocol};
 use tracing::{debug, trace, warn};
 
-use crate::codec::{read_length_prefixed, write_length_prefixed, Codec};
+use crate::codec::{Codec, read_length_prefixed, write_length_prefixed};
 use crate::protocol::{Config, Message};
 
 /// Protocol identifier for scatter.

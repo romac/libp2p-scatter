@@ -11,7 +11,7 @@ const PROTOCOL_INFO: &str = "/ax/broadcast/1.0.0";
 
 /// A topic identifier for the broadcast protocol.
 ///
-/// Topics are fixed-size identifiers that can hold up to [`MAX_TOPIC_LENGTH`](Self::MAX_TOPIC_LENGTH)
+/// Topics are fixed-size identifiers that can hold up to [`MAX_LENGTH`](Self::MAX_LENGTH)
 /// bytes. They are used to group messages so that peers can subscribe to specific topics
 /// and only receive broadcasts for topics they are interested in.
 ///
@@ -44,7 +44,7 @@ impl Topic {
     ///
     /// # Panics
     ///
-    /// Panics if `topic.len()` exceeds [`MAX_TOPIC_LENGTH`](Self::MAX_TOPIC_LENGTH).
+    /// Panics if `topic.len()` exceeds [`MAX_LENGTH`](Self::MAX_LENGTH).
     ///
     /// # Example
     ///
