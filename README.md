@@ -1,5 +1,6 @@
 [![API Documentation][docs-image]][docs-link]
 [![Build Status][build-image]][build-link]
+[![codecov][codecov-image]][codecov-link]
 ![Rust Stable][rustc-image]
 ![Apache 2.0 Licensed][license-apache-image]
 ![MIT Licensed][license-mit-image]
@@ -21,3 +22,5 @@ MIT OR Apache-2.0
 [license-apache-image]: https://img.shields.io/badge/license-Apache_2.0-blue.svg
 [license-mit-image]: https://img.shields.io/badge/license-MIT-blue.svg
 [rustc-image]: https://img.shields.io/badge/rustc-stable-orange.svg
+[codecov-image]: https://codecov.io/github/romac/libp2p-scatter/branch/main/graph/badge.svg?token=EQNU0W2JJ0
+[codecov-link]: https://codecov.io/github/romac/libp2p-scatter
