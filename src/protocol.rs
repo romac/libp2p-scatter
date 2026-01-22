@@ -1,11 +1,11 @@
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, Result};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 
-use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
+use crate::codec::{Codec, read_length_prefixed, write_length_prefixed};
 
 const PROTOCOL_INFO: &str = "/ax/broadcast/1.0.0";
 
@@ -92,61 +92,9 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(Error::new(ErrorKind::InvalidData, "empty message"));
-        }
-        let topic_len = (bytes[0] >> 2) as usize;
-        if bytes.len() < topic_len + 1 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "topic length out of range",
-            ));
-        }
-        let msg_len = bytes.len() - topic_len - 1;
-        let topic = Topic::new(&bytes[1..topic_len + 1]);
-        Ok(match bytes[0] & 0b11 {
-            0b00 => Message::Subscribe(topic),
-            0b10 => Message::Unsubscribe(topic),
-            0b01 => {
-                let mut msg = Vec::with_capacity(msg_len);
-                msg.extend_from_slice(&bytes[(topic_len + 1)..]);
-                Message::Broadcast(topic, msg.into())
-            }
-            _ => return Err(Error::new(ErrorKind::InvalidData, "invalid header")),
-        })
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        match self {
-            Message::Subscribe(topic) => {
-                let mut buf = Vec::with_capacity(topic.len() + 1);
-                buf.push((topic.len() as u8) << 2);
-                buf.extend_from_slice(topic);
-                buf
-            }
-            Message::Unsubscribe(topic) => {
-                let mut buf = Vec::with_capacity(topic.len() + 1);
-                buf.push((topic.len() as u8) << 2 | 0b10);
-                buf.extend_from_slice(topic);
-                buf
-            }
-            Message::Broadcast(topic, msg) => {
-                let mut buf = Vec::with_capacity(topic.len() + msg.len() + 1);
-                buf.push((topic.len() as u8) << 2 | 0b01);
-                buf.extend_from_slice(topic);
-                buf.extend_from_slice(msg);
-                buf
-            }
-        }
-    }
-
+    /// Returns the encoded size of this message in bytes.
     pub fn len(&self) -> usize {
-        match self {
-            Message::Subscribe(topic) => 1 + topic.len(),
-            Message::Unsubscribe(topic) => 1 + topic.len(),
-            Message::Broadcast(topic, msg) => 1 + topic.len() + msg.len(),
-        }
+        Codec::encoded_len(self)
     }
 }
 
@@ -191,7 +139,7 @@ where
         Box::pin(async move {
             let packet = read_length_prefixed(&mut socket, self.max_buf_size).await?;
             socket.close().await?;
-            let request = Message::from_bytes(&packet)?;
+            let request = Codec::decode(&packet)?;
             Ok(request)
         })
     }
@@ -216,8 +164,9 @@ where
 
     fn upgrade_outbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
         Box::pin(async move {
-            let bytes = self.to_bytes();
-            write_length_prefixed(&mut socket, bytes).await?;
+            let mut buf = Vec::with_capacity(Codec::encoded_len(&self));
+            Codec::encode(&self, &mut buf)?;
+            write_length_prefixed(&mut socket, buf).await?;
             socket.close().await?;
             Ok(())
         })
@@ -226,7 +175,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
+
     use super::*;
+
+    /// Helper to encode a message to a Vec for testing.
+    fn encode_to_vec(msg: &Message) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(Codec::encoded_len(msg));
+        Codec::encode(msg, &mut buf).unwrap();
+        buf
+    }
 
     // ==================== Topic Tests ====================
 
@@ -278,7 +236,7 @@ mod tests {
         assert!(t1 < t2);
     }
 
-    // ==================== Message Roundtrip Tests ====================
+    // ==================== Codec Roundtrip Tests ====================
 
     #[test]
     fn test_roundtrip() {
@@ -290,7 +248,7 @@ mod tests {
             Message::Broadcast(topic, Bytes::from_static(b"content")),
         ];
         for msg in &msgs {
-            let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+            let msg2 = Codec::decode(&encode_to_vec(msg)).unwrap();
             assert_eq!(msg, &msg2);
         }
     }
@@ -304,7 +262,7 @@ mod tests {
             Message::Broadcast(topic, Bytes::from_static(b"payload")),
         ];
         for msg in &msgs {
-            let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+            let msg2 = Codec::decode(&encode_to_vec(msg)).unwrap();
             assert_eq!(msg, &msg2);
         }
     }
@@ -319,7 +277,7 @@ mod tests {
             Message::Broadcast(topic, Bytes::from_static(b"data")),
         ];
         for msg in &msgs {
-            let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+            let msg2 = Codec::decode(&encode_to_vec(msg)).unwrap();
             assert_eq!(msg, &msg2);
         }
     }
@@ -328,7 +286,7 @@ mod tests {
     fn test_roundtrip_empty_payload() {
         let topic = Topic::new(b"topic");
         let msg = Message::Broadcast(topic, Bytes::new());
-        let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+        let msg2 = Codec::decode(&encode_to_vec(&msg)).unwrap();
         assert_eq!(msg, msg2);
     }
 
@@ -337,7 +295,7 @@ mod tests {
         let topic = Topic::new(b"topic");
         let payload = Bytes::from(vec![0xAB; 10000]);
         let msg = Message::Broadcast(topic, payload);
-        let msg2 = Message::from_bytes(&msg.to_bytes()).unwrap();
+        let msg2 = Codec::decode(&encode_to_vec(&msg)).unwrap();
         assert_eq!(msg, msg2);
     }
 
@@ -354,11 +312,11 @@ mod tests {
         ); // 1 + 5 + 5
     }
 
-    // ==================== Error Condition Tests ====================
+    // ==================== Codec Error Condition Tests ====================
 
     #[test]
     fn test_empty_message_error() {
-        let result = Message::from_bytes(&[]);
+        let result = Codec::decode(&[]);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
     }
@@ -367,7 +325,7 @@ mod tests {
     fn test_truncated_topic_error() {
         // Header says topic is 5 bytes but only 2 bytes follow
         let bytes = [0b0001_0100, b'a', b'b']; // topic_len = 5, actual = 2
-        let result = Message::from_bytes(&bytes);
+        let result = Codec::decode(&bytes);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
     }
@@ -376,7 +334,7 @@ mod tests {
     fn test_invalid_message_type_error() {
         // Type bits 0b11 are invalid
         let bytes = [0b0000_0011]; // topic_len = 0, type = 0b11
-        let result = Message::from_bytes(&bytes);
+        let result = Codec::decode(&bytes);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
     }
@@ -385,7 +343,7 @@ mod tests {
     #[should_panic]
     fn test_invalid_message() {
         let out_of_range = [0b0000_0100];
-        Message::from_bytes(&out_of_range).unwrap();
+        Codec::decode(&out_of_range).unwrap();
     }
 
     // ==================== Wire Format Tests ====================
@@ -394,7 +352,7 @@ mod tests {
     fn test_subscribe_wire_format() {
         let topic = Topic::new(b"test");
         let msg = Message::Subscribe(topic);
-        let bytes = msg.to_bytes();
+        let bytes = encode_to_vec(&msg);
 
         // Header: topic_len (4) << 2 | type (0b00) = 0b0001_0000 = 16
         assert_eq!(bytes[0], 16);
@@ -405,7 +363,7 @@ mod tests {
     fn test_unsubscribe_wire_format() {
         let topic = Topic::new(b"test");
         let msg = Message::Unsubscribe(topic);
-        let bytes = msg.to_bytes();
+        let bytes = encode_to_vec(&msg);
 
         // Header: topic_len (4) << 2 | type (0b10) = 0b0001_0010 = 18
         assert_eq!(bytes[0], 18);
@@ -416,7 +374,7 @@ mod tests {
     fn test_broadcast_wire_format() {
         let topic = Topic::new(b"test");
         let msg = Message::Broadcast(topic, Bytes::from_static(b"data"));
-        let bytes = msg.to_bytes();
+        let bytes = encode_to_vec(&msg);
 
         // Header: topic_len (4) << 2 | type (0b01) = 0b0001_0001 = 17
         assert_eq!(bytes[0], 17);

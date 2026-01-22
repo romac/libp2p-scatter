@@ -1,6 +1,9 @@
-use std::io;
+use std::io::{self, Write};
 
+use bytes::Bytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::protocol::{Message, Topic};
 
 /// Reads a length-prefixed message from the given socket.
 ///
@@ -101,6 +104,106 @@ pub async fn write_varint(
     socket.write_all(&len_data[..encoded_len]).await?;
 
     Ok(())
+}
+
+/// Wire format codec for protocol messages.
+///
+/// This type handles encoding and decoding of [`Message`] values to/from the
+/// wire format. The codec is separate from the message type to allow for
+/// zero-allocation encoding via the [`encode`](Self::encode) method.
+///
+/// # Wire Format
+///
+/// Each message is encoded as:
+/// - 1 byte header: `[topic_len (6 bits) | message_type (2 bits)]`
+/// - `topic_len` bytes: the topic
+/// - For `Broadcast` messages: the payload bytes
+///
+/// Message type bits:
+/// - `0b00`: Subscribe
+/// - `0b01`: Broadcast
+/// - `0b10`: Unsubscribe
+/// - `0b11`: Reserved (invalid)
+pub struct Codec;
+
+impl Codec {
+    /// Wire type tag for Subscribe messages.
+    const TAG_SUBSCRIBE: u8 = 0b00;
+    /// Wire type tag for Broadcast messages.
+    const TAG_BROADCAST: u8 = 0b01;
+    /// Wire type tag for Unsubscribe messages.
+    const TAG_UNSUBSCRIBE: u8 = 0b10;
+    /// Mask to extract the message type from the header byte.
+    const TAG_MASK: u8 = 0b11;
+
+    /// Decodes a message from a byte slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The input is empty
+    /// - The topic length in the header exceeds the available bytes
+    /// - The message type bits are invalid (`0b11`)
+    pub fn decode(bytes: &[u8]) -> io::Result<Message> {
+        if bytes.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "empty message"));
+        }
+        let topic_len = (bytes[0] >> 2) as usize;
+        if bytes.len() < topic_len + 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "topic length out of range",
+            ));
+        }
+        let topic = Topic::new(&bytes[1..topic_len + 1]);
+        match bytes[0] & Self::TAG_MASK {
+            Self::TAG_SUBSCRIBE => Ok(Message::Subscribe(topic)),
+            Self::TAG_UNSUBSCRIBE => Ok(Message::Unsubscribe(topic)),
+            Self::TAG_BROADCAST => {
+                let payload = Bytes::copy_from_slice(&bytes[topic_len + 1..]);
+                Ok(Message::Broadcast(topic, payload))
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header")),
+        }
+    }
+
+    /// Encodes a message to a writer without intermediate allocation.
+    ///
+    /// This method writes the message directly to the provided writer,
+    /// avoiding the need to allocate a temporary buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to the writer fails.
+    pub fn encode<W: Write>(message: &Message, writer: &mut W) -> io::Result<()> {
+        match message {
+            Message::Subscribe(topic) => {
+                writer.write_all(&[(topic.len() as u8) << 2 | Self::TAG_SUBSCRIBE])?;
+                writer.write_all(topic.as_ref())?;
+            }
+            Message::Unsubscribe(topic) => {
+                writer.write_all(&[(topic.len() as u8) << 2 | Self::TAG_UNSUBSCRIBE])?;
+                writer.write_all(topic.as_ref())?;
+            }
+            Message::Broadcast(topic, payload) => {
+                writer.write_all(&[(topic.len() as u8) << 2 | Self::TAG_BROADCAST])?;
+                writer.write_all(topic.as_ref())?;
+                writer.write_all(payload)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the encoded size of a message in bytes.
+    ///
+    /// This is useful for pre-allocating buffers or for length-prefixed framing.
+    pub fn encoded_len(message: &Message) -> usize {
+        match message {
+            Message::Subscribe(topic) => 1 + topic.len(),
+            Message::Unsubscribe(topic) => 1 + topic.len(),
+            Message::Broadcast(topic, payload) => 1 + topic.len() + payload.len(),
+        }
+    }
 }
 
 #[cfg(test)]

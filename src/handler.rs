@@ -17,7 +17,7 @@ use libp2p::swarm::handler::{
 use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, StreamProtocol, SubstreamProtocol};
 use tracing::{debug, trace, warn};
 
-use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
+use crate::codec::{read_length_prefixed, write_length_prefixed, Codec};
 use crate::protocol::{Config, Message};
 
 /// Protocol identifier for scatter.
@@ -387,13 +387,14 @@ async fn read_message(stream: &mut Substream, max_buf_size: usize) -> io::Result
             "empty packet (stream closed)",
         ));
     }
-    Message::from_bytes(&packet)
+    Codec::decode(&packet)
 }
 
 /// Send a single message on the stream.
 async fn send_message(stream: &mut Substream, message: &Message) -> io::Result<()> {
-    let bytes = message.to_bytes();
-    write_length_prefixed(stream, bytes).await
+    let mut buf = Vec::with_capacity(Codec::encoded_len(message));
+    Codec::encode(message, &mut buf)?;
+    write_length_prefixed(stream, buf).await
 }
 
 #[cfg(test)]
@@ -650,6 +651,13 @@ mod tests {
 
     // ==================== read_message / send_message Tests ====================
 
+    /// Helper to encode a message to a Vec for testing.
+    fn encode_to_vec(msg: &Message) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(Codec::encoded_len(msg));
+        Codec::encode(msg, &mut buf).unwrap();
+        buf
+    }
+
     #[test]
     fn test_send_message_and_read_message_roundtrip() {
         block_on(async {
@@ -658,17 +666,17 @@ mod tests {
 
             // Write message to buffer
             let mut buf = Vec::new();
-            let bytes = original.to_bytes();
-            crate::length_prefixed::write_length_prefixed(&mut buf, bytes)
+            let bytes = encode_to_vec(&original);
+            crate::codec::write_length_prefixed(&mut buf, bytes)
                 .await
                 .unwrap();
 
             // Read it back
             let mut cursor = Cursor::new(buf);
-            let packet = crate::length_prefixed::read_length_prefixed(&mut cursor, 1024)
+            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
                 .await
                 .unwrap();
-            let received = Message::from_bytes(&packet).unwrap();
+            let received = Codec::decode(&packet).unwrap();
 
             assert_eq!(original, received);
         });
@@ -679,19 +687,19 @@ mod tests {
         block_on(async {
             // Write a zero-length message (varint 0)
             let mut buf = Vec::new();
-            crate::length_prefixed::write_length_prefixed(&mut buf, b"")
+            crate::codec::write_length_prefixed(&mut buf, b"")
                 .await
                 .unwrap();
 
             let mut cursor = Cursor::new(buf);
-            let packet = crate::length_prefixed::read_length_prefixed(&mut cursor, 1024)
+            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
                 .await
                 .unwrap();
 
             // Empty packet should be treated as EOF by read_message
             assert!(packet.is_empty());
-            // Message::from_bytes on empty returns error
-            let result = Message::from_bytes(&packet);
+            // Codec::decode on empty returns error
+            let result = Codec::decode(&packet);
             assert!(result.is_err());
         });
     }
@@ -703,17 +711,17 @@ mod tests {
             let msg = Message::Subscribe(topic);
 
             let mut buf = Vec::new();
-            let bytes = msg.to_bytes();
-            crate::length_prefixed::write_length_prefixed(&mut buf, bytes)
+            let bytes = encode_to_vec(&msg);
+            crate::codec::write_length_prefixed(&mut buf, bytes)
                 .await
                 .unwrap();
 
             // Verify we can read it back
             let mut cursor = Cursor::new(buf);
-            let packet = crate::length_prefixed::read_length_prefixed(&mut cursor, 1024)
+            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
                 .await
                 .unwrap();
-            let received = Message::from_bytes(&packet).unwrap();
+            let received = Codec::decode(&packet).unwrap();
 
             assert_eq!(msg, received);
         });
@@ -726,16 +734,16 @@ mod tests {
             let msg = Message::Unsubscribe(topic);
 
             let mut buf = Vec::new();
-            let bytes = msg.to_bytes();
-            crate::length_prefixed::write_length_prefixed(&mut buf, bytes)
+            let bytes = encode_to_vec(&msg);
+            crate::codec::write_length_prefixed(&mut buf, bytes)
                 .await
                 .unwrap();
 
             let mut cursor = Cursor::new(buf);
-            let packet = crate::length_prefixed::read_length_prefixed(&mut cursor, 1024)
+            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
                 .await
                 .unwrap();
-            let received = Message::from_bytes(&packet).unwrap();
+            let received = Codec::decode(&packet).unwrap();
 
             assert_eq!(msg, received);
         });
