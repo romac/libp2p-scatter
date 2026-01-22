@@ -106,9 +106,9 @@ impl Handler {
     fn start_inbound_read(&mut self, mut stream: Substream) {
         trace!("Starting inbound read on substream");
 
-        let max_buf_size = self.config.max_buf_size;
+        let max_size = self.config.max_message_size;
         self.inbound = InboundState::Reading(Box::pin(async move {
-            let result = read_message(&mut stream, max_buf_size).await;
+            let result = read_message(&mut stream, max_size).await;
             (stream, result)
         }));
     }
@@ -379,8 +379,8 @@ impl ConnectionHandler for Handler {
 }
 
 /// Read a single message from the stream.
-async fn read_message(stream: &mut Substream, max_buf_size: usize) -> io::Result<Message> {
-    let packet = read_length_prefixed(stream, max_buf_size).await?;
+async fn read_message(stream: &mut Substream, max_size: usize) -> io::Result<Message> {
+    let packet = read_length_prefixed(stream, max_size).await?;
     if packet.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -418,9 +418,9 @@ mod tests {
 
     #[test]
     fn test_handler_with_config() {
-        let config = Config::default().max_buf_size(1024);
+        let config = Config::default().max_message_size(1024);
         let handler = Handler::new(config);
-        assert_eq!(handler.config.max_buf_size, 1024);
+        assert_eq!(handler.config.max_message_size, 1024);
     }
 
     // ==================== Queue Management Tests ====================

@@ -77,10 +77,14 @@ impl AsRef<[u8]> for Topic {
     }
 }
 
+/// Messages used in the scatter protocol.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
+    /// Subscribe to a topic.
     Subscribe(Topic),
+    /// Broadcast a message to a topic.
     Broadcast(Topic, Bytes),
+    /// Unsubscribe from a topic.
     Unsubscribe(Topic),
 }
 
@@ -100,14 +104,17 @@ impl Message {
     }
 }
 
+/// Configuration options for the scatter protocol.
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub max_buf_size: usize,
+    /// Maximum allowed size for messages, in bytes.
+    pub max_message_size: usize,
 }
 
 impl Config {
-    pub fn max_buf_size(mut self, max_buf_size: usize) -> Self {
-        self.max_buf_size = max_buf_size;
+    /// Sets the maximum allowed size for messages, in bytes.
+    pub fn max_message_size(mut self, max_message_size: usize) -> Self {
+        self.max_message_size = max_message_size;
         self
     }
 }
@@ -115,7 +122,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_buf_size: 1024 * 1024 * 4, // 4 MiB
+            max_message_size: 1024 * 1024 * 4, // 4 MiB
         }
     }
 }
@@ -334,12 +341,12 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.max_buf_size, 4 * 1024 * 1024); // 4 MiB
+        assert_eq!(config.max_message_size, 4 * 1024 * 1024); // 4 MiB
     }
 
     #[test]
     fn test_config_builder() {
-        let config = Config::default().max_buf_size(1024);
-        assert_eq!(config.max_buf_size, 1024);
+        let config = Config::default().max_message_size(1024);
+        assert_eq!(config.max_message_size, 1024);
     }
 }
