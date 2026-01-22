@@ -21,7 +21,7 @@ use crate::codec::{Codec, read_length_prefixed, write_length_prefixed};
 use crate::protocol::{Config, Message};
 
 /// Protocol identifier for scatter.
-const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/ax/broadcast/1.0.0");
+const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter/1.0.0");
 
 /// Maximum number of attempts to open an outbound substream before giving up.
 const MAX_SUBSTREAM_ATTEMPTS: usize = 5;
