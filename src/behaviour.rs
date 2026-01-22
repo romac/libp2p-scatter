@@ -16,13 +16,18 @@ use crate::protocol::{Config, Message, Topic};
 #[cfg(feature = "metrics")]
 use crate::metrics::{Metrics, Registry};
 
+/// Events produced by the behaviour.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
+    /// A peer has subscribed to a topic.
     Subscribed(PeerId, Topic),
+    /// A peer has unsubscribed from a topic.
     Unsubscribed(PeerId, Topic),
+    /// A message has been received from a peer on a topic.
     Received(PeerId, Topic, Bytes),
 }
 
+/// Network behaviour that handles the scatter protocol
 #[derive(Default)]
 pub struct Behaviour {
     config: Config,
@@ -47,6 +52,7 @@ impl fmt::Debug for Behaviour {
 }
 
 impl Behaviour {
+    /// Creates a new behaviour with the given configuration.
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -54,6 +60,8 @@ impl Behaviour {
         }
     }
 
+    /// Creates a new behaviour with the given configuration,
+    /// and registers metrics using the provided registry.
     #[cfg(feature = "metrics")]
     pub fn new_with_metrics(config: Config, registry: &mut Registry) -> Self {
         Self {
@@ -63,21 +71,27 @@ impl Behaviour {
         }
     }
 
+    /// Returns an iterator over the topics this node is subscribed to.
     pub fn subscribed(&self) -> impl Iterator<Item = &Topic> + '_ {
         self.subscriptions.iter()
     }
 
+    /// Returns an iterator over the peers subscribed to the given topic.
     pub fn peers(&self, topic: &Topic) -> Option<impl Iterator<Item = &PeerId> + '_> {
         self.topics.get(topic).map(|peers| peers.iter())
     }
 
+    /// Returns an iterator over the topics the given peer is subscribed to.
     pub fn topics(&self, peer: &PeerId) -> Option<impl Iterator<Item = &Topic> + '_> {
         self.peers.get(peer).map(|topics| topics.iter())
     }
 
+    /// Subscribe to a topic.
     pub fn subscribe(&mut self, topic: Topic) {
         self.subscriptions.insert(topic);
+
         let msg = Message::Subscribe(topic);
+
         for peer in self.peers.keys() {
             self.events.push_back(ToSwarm::NotifyHandler {
                 peer_id: *peer,
@@ -92,6 +106,7 @@ impl Behaviour {
         }
     }
 
+    /// Unsubscribe from a topic.
     pub fn unsubscribe(&mut self, topic: &Topic) {
         self.subscriptions.remove(topic);
         let msg = Message::Unsubscribe(*topic);
@@ -111,6 +126,7 @@ impl Behaviour {
         }
     }
 
+    /// Broadcast a message to all peers subscribed to the given topic.
     pub fn broadcast(&mut self, topic: &Topic, msg: Bytes) {
         let msg = Message::Broadcast(*topic, msg);
         if let Some(peers) = self.topics.get(topic) {
