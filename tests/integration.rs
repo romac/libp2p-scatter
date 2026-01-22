@@ -8,156 +8,131 @@ mod common;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::StreamExt;
-use libp2p::swarm::SwarmEvent;
 use libp2p_scatter::{Event, Topic};
-use tokio::time::timeout;
 use tracing::info;
 
-use crate::common::*;
+use crate::common::TestNetwork;
 
 // ==================== Basic Connectivity Tests ====================
 
 #[tokio::test]
 #[test_log::test]
 async fn test_two_peers_connect() {
-    let (swarm_a, swarm_b) = create_connected_pair().await;
+    let network = TestNetwork::fully_connected(2).await;
 
-    // Verify both swarms know about each other
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
 
-    assert!(swarm_a.is_connected(&peer_b));
-    assert!(swarm_b.is_connected(&peer_a));
+    assert!(network.node(0).swarm().is_connected(&peer_1));
+    assert!(network.node(1).swarm().is_connected(&peer_0));
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_subscribe_propagates() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"test-topic");
-    let peer_a = *swarm_a.local_peer_id();
+    let peer_0 = network.peer_id(0);
 
-    // A subscribes
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Node 0 subscribes
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // B should receive the subscription event
-    let event = wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Subscribed(_, t) if *t == topic),
-    )
-    .await
-    .expect("Timeout waiting for subscription");
+    // Node 1 should receive the subscription event
+    let event = network
+        .wait_for_event_on(1, |e| matches!(e, Event::Subscribed(_, t) if *t == topic))
+        .await;
 
-    assert_eq!(event, Event::Subscribed(peer_a, topic));
+    assert_eq!(event, Event::Subscribed(peer_0, topic));
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_broadcast_delivery() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"test-topic");
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
     let payload = Bytes::from_static(b"hello world");
 
-    // B subscribes first
-    swarm_b.behaviour_mut().subscribe(topic);
+    // Node 1 subscribes first
+    network.node_mut(1).behaviour_mut().subscribe(topic);
 
-    info!("B subscribed to topic");
+    info!("Node 1 subscribed to topic");
 
-    // Wait for A to see B's subscription (this also drives B to send the subscription)
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(p, t) if *p == peer_b && *t == topic),
-    )
-    .await
-    .expect("Timeout waiting for subscription");
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| {
+            matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic)
+        })
+        .await;
 
-    info!("A saw B's subscription");
+    info!("Node 0 saw node 1's subscription");
 
-    // Now A subscribes too (so A is known to B for the topic)
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Now node 0 subscribes too
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // Wait for B to see A's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Subscribed(p, t) if *p == peer_a && *t == topic),
-    )
-    .await
-    .expect("Timeout waiting for subscription");
+    // Wait for node 1 to see node 0's subscription
+    network
+        .wait_for_event_on(1, |e| {
+            matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic)
+        })
+        .await;
 
-    // A broadcasts
-    swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
+    // Node 0 broadcasts
+    network
+        .node_mut(0)
+        .behaviour_mut()
+        .broadcast(&topic, payload.clone());
 
-    info!("A broadcasted message on topic");
+    info!("Node 0 broadcasted message on topic");
 
-    // B should receive the broadcast
-    let event = wait_for_scatter_event(&mut swarm_a, &mut swarm_b, Target::B, |e| {
-        matches!(e, Event::Received(_, _, _))
-    })
-    .await
-    .expect("Timeout waiting for broadcast");
+    // Node 1 should receive the broadcast
+    let event = network
+        .wait_for_event_on(1, |e| matches!(e, Event::Received(_, _, _)))
+        .await;
 
-    info!("B received broadcasted message");
+    info!("Node 1 received broadcasted message");
 
-    assert_eq!(event, Event::Received(peer_a, topic, payload));
+    assert_eq!(event, Event::Received(peer_0, topic, payload));
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_unsubscribe_propagates() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"test-topic");
-    let peer_a = *swarm_a.local_peer_id();
+    let peer_0 = network.peer_id(0);
 
-    // B subscribes (so A will have B in its topic peers)
-    swarm_b.behaviour_mut().subscribe(topic);
+    // Node 1 subscribes (so node 0 will have node 1 in its topic peers)
+    network.node_mut(1).behaviour_mut().subscribe(topic);
 
-    // Wait for A to see B's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(_, t) if *t == topic),
-    )
-    .await;
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| matches!(e, Event::Subscribed(_, t) if *t == topic))
+        .await;
 
-    // A subscribes
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Node 0 subscribes
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // Wait for B to see A's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Subscribed(p, t) if *p == peer_a && *t == topic),
-    )
-    .await;
+    // Wait for node 1 to see node 0's subscription
+    network
+        .wait_for_event_on(1, |e| {
+            matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic)
+        })
+        .await;
 
-    // A unsubscribes
-    swarm_a.behaviour_mut().unsubscribe(&topic);
+    // Node 0 unsubscribes
+    network.node_mut(0).behaviour_mut().unsubscribe(&topic);
 
-    // B should receive the unsubscription event
-    let event = wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Unsubscribed(_, t) if *t == topic),
-    )
-    .await
-    .expect("Timeout waiting for unsubscription");
+    // Node 1 should receive the unsubscription event
+    let event = network
+        .wait_for_event_on(1, |e| matches!(e, Event::Unsubscribed(_, t) if *t == topic))
+        .await;
 
-    assert_eq!(event, Event::Unsubscribed(peer_a, topic));
+    assert_eq!(event, Event::Unsubscribed(peer_0, topic));
 }
 
 // ==================== Multi-Peer Tests ====================
@@ -165,171 +140,117 @@ async fn test_unsubscribe_propagates() {
 #[tokio::test]
 #[test_log::test]
 async fn test_three_peers_broadcast() {
-    let (mut swarm_a, mut swarm_b, mut swarm_c) = create_connected_trio().await;
+    let mut network = TestNetwork::star(3).await;
 
     let topic = Topic::new(b"broadcast-topic");
-    let peer_a = *swarm_a.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
+    let peer_2 = network.peer_id(2);
     let payload = Bytes::from_static(b"message to all");
 
-    // B and C subscribe
-    swarm_b.behaviour_mut().subscribe(topic);
-    swarm_c.behaviour_mut().subscribe(topic);
+    // Nodes 1 and 2 subscribe
+    network.node_mut(1).behaviour_mut().subscribe(topic);
+    network.node_mut(2).behaviour_mut().subscribe(topic);
 
-    // Wait for A to see both subscriptions
-    let mut b_subscribed = false;
-    let mut c_subscribed = false;
-    let peer_b = *swarm_b.local_peer_id();
-    let peer_c = *swarm_c.local_peer_id();
+    // Wait for node 0 to see both subscriptions
+    network
+        .wait_for_events(|events| {
+            let sub_count = events
+                .iter()
+                .filter(|(idx, e)| {
+                    *idx == 0
+                        && matches!(e, Event::Subscribed(p, t) if *t == topic && (*p == peer_1 || *p == peer_2))
+                })
+                .count();
+            sub_count >= 2
+        })
+        .await;
 
-    let result = timeout(DEFAULT_TIMEOUT, async {
-        loop {
-            tokio::select! {
-                event = swarm_a.select_next_some() => {
-                    if let SwarmEvent::Behaviour(Event::Subscribed(p, t)) = event {
-                        if t == topic {
-                            if p == peer_b {
-                                b_subscribed = true;
-                            } else if p == peer_c {
-                                c_subscribed = true;
-                            }
-                        }
-                    }
-                }
-                event = swarm_b.select_next_some() => {
-                    // Drive B
-                    let _ = event;
-                }
-                event = swarm_c.select_next_some() => {
-                    // Drive C
-                    let _ = event;
-                }
-            }
+    // Node 0 broadcasts
+    network
+        .node_mut(0)
+        .behaviour_mut()
+        .broadcast(&topic, payload.clone());
 
-            if b_subscribed && c_subscribed {
-                break;
-            }
-        }
-    })
-    .await;
-    result.expect("Timeout waiting for subscriptions");
+    // Both nodes 1 and 2 should receive it
+    let events = network
+        .wait_for_events(|events| {
+            let recv_count = events
+                .iter()
+                .filter(|(idx, e)| {
+                    (*idx == 1 || *idx == 2)
+                        && matches!(e, Event::Received(p, t, msg) if *p == peer_0 && *t == topic && *msg == payload)
+                })
+                .count();
+            recv_count >= 2
+        })
+        .await;
 
-    // A broadcasts
-    swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
+    // Verify both received
+    let node1_received = events
+        .iter()
+        .any(|(idx, e)| *idx == 1 && matches!(e, Event::Received(_, _, _)));
+    let node2_received = events
+        .iter()
+        .any(|(idx, e)| *idx == 2 && matches!(e, Event::Received(_, _, _)));
 
-    // Both B and C should receive it
-    let mut b_received = false;
-    let mut c_received = false;
-
-    let result = timeout(DEFAULT_TIMEOUT, async {
-        loop {
-            tokio::select! {
-                event = swarm_a.select_next_some() => {
-                    let _ = event;
-                }
-                event = swarm_b.select_next_some() => {
-                    if let SwarmEvent::Behaviour(Event::Received(p, t, msg)) = event {
-                        if p == peer_a && t == topic && msg == payload {
-                            b_received = true;
-                        }
-                    }
-                }
-                event = swarm_c.select_next_some() => {
-                    if let SwarmEvent::Behaviour(Event::Received(p, t, msg)) = event {
-                        if p == peer_a && t == topic && msg == payload {
-                            c_received = true;
-                        }
-                    }
-                }
-            }
-
-            if b_received && c_received {
-                break;
-            }
-        }
-    })
-    .await;
-    result.expect("Timeout waiting for broadcasts");
-
-    assert!(b_received);
-    assert!(c_received);
+    assert!(node1_received, "Node 1 should have received the broadcast");
+    assert!(node2_received, "Node 2 should have received the broadcast");
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_selective_broadcast() {
-    let (mut swarm_a, mut swarm_b, mut swarm_c) = create_connected_trio().await;
+    let mut network = TestNetwork::star(3).await;
 
     let topic1 = Topic::new(b"topic1");
     let topic2 = Topic::new(b"topic2");
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
-    let peer_c = *swarm_c.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
+    let peer_2 = network.peer_id(2);
     let payload = Bytes::from_static(b"selective message");
 
-    // B subscribes to topic1, C subscribes to topic2
-    swarm_b.behaviour_mut().subscribe(topic1);
-    swarm_c.behaviour_mut().subscribe(topic2);
+    // Node 1 subscribes to topic1, node 2 subscribes to topic2
+    network.node_mut(1).behaviour_mut().subscribe(topic1);
+    network.node_mut(2).behaviour_mut().subscribe(topic2);
 
-    // Wait for A to see both subscriptions
-    let mut b_sub = false;
-    let mut c_sub = false;
+    // Wait for node 0 to see both subscriptions
+    network
+        .wait_for_events(|events| {
+            let has_1_sub = events.iter().any(|(idx, e)| {
+                *idx == 0 && matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic1)
+            });
+            let has_2_sub = events.iter().any(|(idx, e)| {
+                *idx == 0 && matches!(e, Event::Subscribed(p, t) if *p == peer_2 && *t == topic2)
+            });
+            has_1_sub && has_2_sub
+        })
+        .await;
 
-    let result = timeout(DEFAULT_TIMEOUT, async {
-        loop {
-            tokio::select! {
-                event = swarm_a.select_next_some() => {
-                    if let SwarmEvent::Behaviour(Event::Subscribed(p, t)) = event {
-                        if p == peer_b && t == topic1 {
-                            b_sub = true;
-                        } else if p == peer_c && t == topic2 {
-                            c_sub = true;
-                        }
-                    }
-                }
-                _ = swarm_b.select_next_some() => {}
-                _ = swarm_c.select_next_some() => {}
-            }
-            if b_sub && c_sub {
-                break;
-            }
-        }
-    })
-    .await;
-    result.expect("Timeout waiting for subscriptions");
+    // Node 0 broadcasts to topic1 only
+    network
+        .node_mut(0)
+        .behaviour_mut()
+        .broadcast(&topic1, payload.clone());
 
-    // A broadcasts to topic1 only
-    swarm_a.behaviour_mut().broadcast(&topic1, payload.clone());
+    // Only node 1 should receive it
+    let event = network
+        .wait_for_event_on(1, |e| {
+            matches!(e, Event::Received(p, t, msg) if *p == peer_0 && *t == topic1 && *msg == payload)
+        })
+        .await;
 
-    // Only B should receive it, not C
-    let mut b_received = false;
+    assert_eq!(event, Event::Received(peer_0, topic1, payload.clone()));
 
-    let result = timeout(Duration::from_secs(2), async {
-        loop {
-            tokio::select! {
-                _ = swarm_a.select_next_some() => {}
-                event = swarm_b.select_next_some() => {
-                    if let SwarmEvent::Behaviour(Event::Received(p, t, msg)) = event {
-                        if p == peer_a && t == topic1 && msg == payload {
-                            b_received = true;
-                            break;
-                        }
-                    }
-                }
-                event = swarm_c.select_next_some() => {
-                    // C should not receive anything on topic1
-                    if let SwarmEvent::Behaviour(Event::Received(_, t, _)) = event {
-                        if t == topic1 {
-                            panic!("C received message on topic1 which it didn't subscribe to");
-                        }
-                    }
-                }
-            }
-        }
-    })
-    .await;
-    result.expect("Timeout waiting for B to receive");
-
-    assert!(b_received);
+    // Give some time and verify node 2 didn't receive anything on topic1
+    let events = network.collect_events(Duration::from_millis(100)).await;
+    let node2_received_topic1 = events.iter().any(|(idx, e)| {
+        *idx == 2 && matches!(e, Event::Received(_, t, _) if *t == topic1)
+    });
+    assert!(
+        !node2_received_topic1,
+        "Node 2 should not have received message on topic1"
+    );
 }
 
 // ==================== Topic Management Tests ====================
@@ -337,88 +258,77 @@ async fn test_selective_broadcast() {
 #[tokio::test]
 #[test_log::test]
 async fn test_multiple_topics() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic1 = Topic::new(b"topic-one");
     let topic2 = Topic::new(b"topic-two");
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
 
-    // A subscribes to both topics
-    swarm_a.behaviour_mut().subscribe(topic1);
-    swarm_a.behaviour_mut().subscribe(topic2);
+    // Node 0 subscribes to both topics
+    network.node_mut(0).behaviour_mut().subscribe(topic1);
+    network.node_mut(0).behaviour_mut().subscribe(topic2);
 
-    // B should see both subscriptions
-    let mut sub1 = false;
-    let mut sub2 = false;
+    // Node 1 should see both subscriptions
+    network
+        .wait_for_events(|events| {
+            let has_sub1 = events.iter().any(|(idx, e)| {
+                *idx == 1 && matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic1)
+            });
+            let has_sub2 = events.iter().any(|(idx, e)| {
+                *idx == 1 && matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic2)
+            });
+            has_sub1 && has_sub2
+        })
+        .await;
 
-    wait_for_scatter_event(&mut swarm_a, &mut swarm_b, Target::B, |e| {
-        if let Event::Subscribed(p, t) = e {
-            if *p == peer_a && *t == topic1 {
-                sub1 = true;
-            } else if *p == peer_a && *t == topic2 {
-                sub2 = true;
-            }
-        }
-        sub1 && sub2
-    })
-    .await
-    .expect("Timeout waiting for subscriptions");
+    // Node 1 also subscribes to topic1
+    network.node_mut(1).behaviour_mut().subscribe(topic1);
 
-    // B also subscribes to topic1
-    swarm_b.behaviour_mut().subscribe(topic1);
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| {
+            matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic1)
+        })
+        .await;
 
-    // Wait for A to see B's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(p, t) if *p == peer_b && *t == topic1),
-    )
-    .await;
-
-    // A sends on topic1
+    // Node 0 sends on topic1
     let msg1 = Bytes::from_static(b"message on topic1");
-    swarm_a.behaviour_mut().broadcast(&topic1, msg1.clone());
+    network
+        .node_mut(0)
+        .behaviour_mut()
+        .broadcast(&topic1, msg1.clone());
 
-    // B receives on topic1
-    let event = wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Received(_, t, _) if *t == topic1),
-    )
-    .await
-    .expect("Timeout waiting for message on topic1");
+    // Node 1 receives on topic1
+    let event = network
+        .wait_for_event_on(1, |e| matches!(e, Event::Received(_, t, _) if *t == topic1))
+        .await;
 
-    assert_eq!(event, Event::Received(peer_a, topic1, msg1));
+    assert_eq!(event, Event::Received(peer_0, topic1, msg1));
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_late_subscriber() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"late-sub-topic");
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_1 = network.peer_id(1);
 
-    // A subscribes first
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Node 0 subscribes first
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // B subscribes later
-    swarm_b.behaviour_mut().subscribe(topic);
+    // Node 1 subscribes later
+    network.node_mut(1).behaviour_mut().subscribe(topic);
 
-    // A should see B's subscription
-    let event = wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(p, t) if *p == peer_b && *t == topic),
-    )
-    .await
-    .expect("Timeout waiting for late subscription");
+    // Node 0 should see node 1's subscription
+    let event = network
+        .wait_for_event_on(0, |e| {
+            matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic)
+        })
+        .await;
 
-    assert_eq!(event, Event::Subscribed(peer_b, topic));
+    assert_eq!(event, Event::Subscribed(peer_1, topic));
 }
 
 // ==================== Edge Cases ====================
@@ -426,164 +336,144 @@ async fn test_late_subscriber() {
 #[tokio::test]
 #[test_log::test]
 async fn test_empty_payload_broadcast() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"empty-payload");
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
     let payload = Bytes::new(); // Empty
 
-    // B subscribes first
-    swarm_b.behaviour_mut().subscribe(topic);
+    // Node 1 subscribes first
+    network.node_mut(1).behaviour_mut().subscribe(topic);
 
-    // Wait for A to see B's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_b),
-    )
-    .await;
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_1))
+        .await;
 
-    // A subscribes so A knows B is subscribed to topic
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Node 0 subscribes so node 0 knows node 1 is subscribed to topic
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // Wait for B to see A's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
-    )
-    .await;
+    // Wait for node 1 to see node 0's subscription
+    network
+        .wait_for_event_on(1, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_0))
+        .await;
 
-    // A broadcasts empty payload
-    swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
+    // Node 0 broadcasts empty payload
+    network
+        .node_mut(0)
+        .behaviour_mut()
+        .broadcast(&topic, payload.clone());
 
-    // B should still receive it
-    let event = wait_for_scatter_event(&mut swarm_a, &mut swarm_b, Target::B, |e| {
-        matches!(e, Event::Received(_, _, _))
-    })
-    .await
-    .expect("Timeout waiting for empty payload broadcast");
+    // Node 1 should still receive it
+    let event = network
+        .wait_for_event_on(1, |e| matches!(e, Event::Received(_, _, _)))
+        .await;
 
-    assert_eq!(event, Event::Received(peer_a, topic, payload));
+    assert_eq!(event, Event::Received(peer_0, topic, payload));
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_large_payload_broadcast() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"large-payload");
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
 
     // Create a payload of 100KB
     let payload = Bytes::from(vec![0xABu8; 100_000]);
 
-    // B subscribes first
-    swarm_b.behaviour_mut().subscribe(topic);
+    // Node 1 subscribes first
+    network.node_mut(1).behaviour_mut().subscribe(topic);
 
-    // Wait for A to see B's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_b),
-    )
-    .await;
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_1))
+        .await;
 
-    // A subscribes
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Node 0 subscribes
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // Wait for B to see A's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
-    )
-    .await;
+    // Wait for node 1 to see node 0's subscription
+    network
+        .wait_for_event_on(1, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_0))
+        .await;
 
-    // A broadcasts large payload
-    swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
+    // Node 0 broadcasts large payload
+    network
+        .node_mut(0)
+        .behaviour_mut()
+        .broadcast(&topic, payload.clone());
 
-    // B should receive it
-    let event = wait_for_scatter_event(&mut swarm_a, &mut swarm_b, Target::B, |e| {
-        matches!(e, Event::Received(_, _, _))
-    })
-    .await
-    .expect("Timeout waiting for large payload broadcast");
+    // Node 1 should receive it
+    let event = network
+        .wait_for_event_on(1, |e| matches!(e, Event::Received(_, _, _)))
+        .await;
 
-    assert_eq!(event, Event::Received(peer_a, topic, payload));
+    assert_eq!(event, Event::Received(peer_0, topic, payload));
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_multiple_broadcasts_in_sequence() {
-    let (mut swarm_a, mut swarm_b) = create_connected_pair().await;
+    let mut network = TestNetwork::fully_connected(2).await;
 
     let topic = Topic::new(b"sequence-topic");
-    let peer_a = *swarm_a.local_peer_id();
-    let peer_b = *swarm_b.local_peer_id();
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
 
-    // B subscribes first
-    swarm_b.behaviour_mut().subscribe(topic);
+    // Node 1 subscribes first
+    network.node_mut(1).behaviour_mut().subscribe(topic);
 
-    // Wait for A to see B's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::A,
-        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_b),
-    )
-    .await;
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_1))
+        .await;
 
-    // A subscribes
-    swarm_a.behaviour_mut().subscribe(topic);
+    // Node 0 subscribes
+    network.node_mut(0).behaviour_mut().subscribe(topic);
 
-    // Wait for B to see A's subscription
-    wait_for_scatter_event(
-        &mut swarm_a,
-        &mut swarm_b,
-        Target::B,
-        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
-    )
-    .await;
+    // Wait for node 1 to see node 0's subscription
+    network
+        .wait_for_event_on(1, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_0))
+        .await;
 
-    // A sends multiple messages
+    // Node 0 sends multiple messages
     let messages: Vec<Bytes> = (0..5)
         .map(|i| Bytes::from(format!("message-{}", i)))
         .collect();
 
     for msg in &messages {
-        swarm_a.behaviour_mut().broadcast(&topic, msg.clone());
+        network.node_mut(0).behaviour_mut().broadcast(&topic, msg.clone());
     }
 
-    // B should receive all of them
-    let mut received = Vec::new();
+    // Node 1 should receive all of them
+    let events = network
+        .wait_for_events(|events| {
+            let recv_count = events
+                .iter()
+                .filter(|(idx, e)| {
+                    *idx == 1 && matches!(e, Event::Received(p, t, _) if *p == peer_0 && *t == topic)
+                })
+                .count();
+            recv_count >= messages.len()
+        })
+        .await;
 
-    let result = timeout(DEFAULT_TIMEOUT, async {
-        loop {
-            tokio::select! {
-                _ = swarm_a.select_next_some() => {}
-                event = swarm_b.select_next_some() => {
-                    if let SwarmEvent::Behaviour(Event::Received(p, t, msg)) = event {
-                        if p == peer_a && t == topic {
-                            received.push(msg);
-                        }
-                    }
+    // Extract received messages
+    let received: Vec<Bytes> = events
+        .iter()
+        .filter_map(|(idx, e)| {
+            if *idx == 1 {
+                if let Event::Received(_, _, msg) = e {
+                    return Some(msg.clone());
                 }
             }
-
-            if received.len() >= messages.len() {
-                break;
-            }
-        }
-    })
-    .await;
-    result.expect("Timeout waiting for messages");
+            None
+        })
+        .collect();
 
     // Verify all messages were received (order may vary due to async)
     assert_eq!(received.len(), messages.len());
