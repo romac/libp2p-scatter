@@ -2,6 +2,7 @@ mod behaviour;
 mod codec;
 mod handler;
 mod protocol;
+mod util;
 
 pub use behaviour::{Behaviour, Event};
 pub use codec::Codec;

@@ -1,6 +1,9 @@
+use core::fmt;
+
 use bytes::Bytes;
 
 use crate::codec::Codec;
+use crate::util::BytesRef;
 
 /// A topic identifier for the broadcast protocol.
 ///
@@ -18,7 +21,7 @@ use crate::codec::Codec;
 /// let topic = Topic::new(b"my-topic");
 /// assert_eq!(topic.as_ref(), b"my-topic");
 /// ```
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Topic {
     /// The actual length of the topic data.
     len: u8,
@@ -60,6 +63,21 @@ impl Topic {
             len: topic.len() as _,
             bytes,
         }
+    }
+}
+
+impl fmt::Debug for Topic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Topic")
+            .field("len", &self.len)
+            .field("bytes", &BytesRef(self.as_ref()))
+            .finish()
+    }
+}
+
+impl fmt::Display for Topic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", BytesRef(self.as_ref()))
     }
 }
 
