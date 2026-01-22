@@ -25,9 +25,10 @@ async fn test_broadcast_delivery() {
 
     // Wait for node 0 to see node 1's subscription
     network
-        .wait_for_event_on(0, |e| {
-            matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic)
-        })
+        .wait_for_event_on(
+            0,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic),
+        )
         .await;
 
     info!("Node 0 saw node 1's subscription");
@@ -37,9 +38,10 @@ async fn test_broadcast_delivery() {
 
     // Wait for node 1 to see node 0's subscription
     network
-        .wait_for_event_on(1, |e| {
-            matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic)
-        })
+        .wait_for_event_on(
+            1,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic),
+        )
         .await;
 
     // Node 0 broadcasts
@@ -92,9 +94,10 @@ async fn test_multiple_topics() {
 
     // Wait for node 0 to see node 1's subscription
     network
-        .wait_for_event_on(0, |e| {
-            matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic1)
-        })
+        .wait_for_event_on(
+            0,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic1),
+        )
         .await;
 
     // Node 0 sends on topic1
@@ -155,7 +158,8 @@ async fn test_multiple_broadcasts_in_sequence() {
             let recv_count = events
                 .iter()
                 .filter(|(idx, e)| {
-                    *idx == 1 && matches!(e, Event::Received(p, t, _) if *p == peer_0 && *t == topic)
+                    *idx == 1
+                        && matches!(e, Event::Received(p, t, _) if *p == peer_0 && *t == topic)
                 })
                 .count();
             recv_count >= messages.len()

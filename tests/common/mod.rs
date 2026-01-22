@@ -217,7 +217,10 @@ impl TestNetwork {
 
     /// Convenience method: creates a fully connected network.
     pub async fn fully_connected(count: usize) -> Self {
-        Self::new(count).await.connect(Topology::FullyConnected).await
+        Self::new(count)
+            .await
+            .connect(Topology::FullyConnected)
+            .await
     }
 
     /// Convenience method: creates a linear chain network.
@@ -233,10 +236,7 @@ impl TestNetwork {
     /// Connects node `from` to node `to`.
     pub async fn connect_nodes(&mut self, from: usize, to: usize) {
         let addr = self.nodes[to].addr.clone();
-        self.nodes[from]
-            .swarm
-            .dial(addr)
-            .expect("Failed to dial");
+        self.nodes[from].swarm.dial(addr).expect("Failed to dial");
 
         // Wait for connection on both sides
         let mut from_connected = false;
@@ -393,7 +393,8 @@ impl TestNetwork {
     where
         F: FnMut(&[(usize, Event)]) -> bool,
     {
-        self.wait_for_events_timeout(DEFAULT_TIMEOUT, predicate).await
+        self.wait_for_events_timeout(DEFAULT_TIMEOUT, predicate)
+            .await
     }
 
     /// Like `wait_for_events` but with a custom timeout.

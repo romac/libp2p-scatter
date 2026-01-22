@@ -58,9 +58,10 @@ async fn test_unsubscribe_propagates() {
 
     // Wait for node 1 to see node 0's subscription
     network
-        .wait_for_event_on(1, |e| {
-            matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic)
-        })
+        .wait_for_event_on(
+            1,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_0 && *t == topic),
+        )
         .await;
 
     // Node 0 unsubscribes
@@ -90,9 +91,10 @@ async fn test_late_subscriber() {
 
     // Node 0 should see node 1's subscription
     let event = network
-        .wait_for_event_on(0, |e| {
-            matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic)
-        })
+        .wait_for_event_on(
+            0,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic),
+        )
         .await;
 
     assert_eq!(event, Event::Subscribed(peer_1, topic));

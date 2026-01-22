@@ -272,9 +272,7 @@ async fn test_large_network_ring_topology() {
         let received_from_sender = events
             .iter()
             .chain(additional_events.iter())
-            .any(|(idx, e)| {
-                *idx == i && matches!(e, Event::Received(p, _, _) if *p == sender)
-            });
+            .any(|(idx, e)| *idx == i && matches!(e, Event::Received(p, _, _) if *p == sender));
         assert!(
             !received_from_sender,
             "Node {} should NOT have received directly from node 0",

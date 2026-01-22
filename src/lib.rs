@@ -405,7 +405,10 @@ mod tests {
         // A broadcasts - B and C should both receive it
         a.broadcast(&topic, msg.clone());
         assert!(a.next().is_none());
-        assert_eq!(b.next().unwrap(), Event::Received(*a.peer_id(), topic, msg.clone()));
+        assert_eq!(
+            b.next().unwrap(),
+            Event::Received(*a.peer_id(), topic, msg.clone())
+        );
         assert_eq!(c.next().unwrap(), Event::Received(*a.peer_id(), topic, msg));
     }
 
@@ -459,7 +462,10 @@ mod tests {
         assert!(a.next().is_none());
 
         // Only B should receive it
-        assert_eq!(b.next().unwrap(), Event::Received(*a.peer_id(), topic1, msg));
+        assert_eq!(
+            b.next().unwrap(),
+            Event::Received(*a.peer_id(), topic1, msg)
+        );
         assert!(c.next().is_none());
     }
 
@@ -519,7 +525,10 @@ mod tests {
         // B broadcasts to topic2 - A should still receive it
         b.broadcast(&topic2, msg.clone());
         assert!(b.next().is_none());
-        assert_eq!(a.next().unwrap(), Event::Received(*b.peer_id(), topic2, msg.clone()));
+        assert_eq!(
+            a.next().unwrap(),
+            Event::Received(*b.peer_id(), topic2, msg.clone())
+        );
 
         // B broadcasts to topic1 - A should NOT receive it
         b.broadcast(&topic1, msg);

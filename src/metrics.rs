@@ -183,21 +183,30 @@ mod tests {
         // Subscribe
         metrics.subscribe(&topic);
         assert_eq!(
-            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            metrics
+                .topic_subscription_status
+                .get_or_create(&topic)
+                .get(),
             1
         );
 
         // Unsubscribe
         metrics.unsubscribe(&topic);
         assert_eq!(
-            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            metrics
+                .topic_subscription_status
+                .get_or_create(&topic)
+                .get(),
             0
         );
 
         // Re-subscribe
         metrics.subscribe(&topic);
         assert_eq!(
-            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            metrics
+                .topic_subscription_status
+                .get_or_create(&topic)
+                .get(),
             1
         );
     }
@@ -324,7 +333,10 @@ mod tests {
 
         // Should still work correctly
         assert_eq!(
-            metrics.topic_subscription_status.get_or_create(&topic).get(),
+            metrics
+                .topic_subscription_status
+                .get_or_create(&topic)
+                .get(),
             1
         );
     }
