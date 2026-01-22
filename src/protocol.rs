@@ -9,16 +9,58 @@ use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
 
 const PROTOCOL_INFO: &str = "/ax/broadcast/1.0.0";
 
+/// A topic identifier for the broadcast protocol.
+///
+/// Topics are fixed-size identifiers that can hold up to [`MAX_TOPIC_LENGTH`](Self::MAX_TOPIC_LENGTH)
+/// bytes. They are used to group messages so that peers can subscribe to specific topics
+/// and only receive broadcasts for topics they are interested in.
+///
+/// The topic is stored inline with a length prefix, making it cheap to copy and compare.
+///
+/// # Example
+///
+/// ```
+/// use libp2p_scatter::Topic;
+///
+/// let topic = Topic::new(b"my-topic");
+/// assert_eq!(topic.as_ref(), b"my-topic");
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Topic {
+    /// The actual length of the topic data.
     len: u8,
+    /// Fixed-size buffer storing the topic bytes.
     bytes: [u8; 64],
 }
 
 impl Topic {
-    pub const MAX_TOPIC_LENGTH: usize = 64;
+    /// Maximum length of a topic in bytes.
+    ///
+    /// This limit is determined by the wire format, which uses 6 bits to encode
+    /// the topic length in the message header.
+    pub const MAX_LENGTH: usize = 63;
 
+    /// Creates a new topic from a byte slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `topic.len()` exceeds [`MAX_TOPIC_LENGTH`](Self::MAX_TOPIC_LENGTH).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use libp2p_scatter::Topic;
+    ///
+    /// let topic = Topic::new(b"events");
+    /// assert_eq!(topic.len(), 6);
+    /// ```
     pub fn new(topic: &[u8]) -> Self {
+        assert!(
+            topic.len() <= Self::MAX_LENGTH,
+            "topic length {} exceeds maximum {}",
+            topic.len(),
+            Self::MAX_LENGTH
+        );
         let mut bytes = [0u8; 64];
         bytes[..topic.len()].copy_from_slice(topic);
         Self {
@@ -197,12 +239,17 @@ mod tests {
 
     #[test]
     fn test_topic_max_length() {
-        // Note: Wire format uses 6 bits for topic length, so max is 63 bytes
-        // Topic::MAX_TOPIC_LENGTH is 64 for storage, but wire max is 63
-        let data = [b'x'; 63];
+        let data = [b'x'; Topic::MAX_LENGTH];
         let topic = Topic::new(&data);
-        assert_eq!(topic.len(), 63);
+        assert_eq!(topic.len(), Topic::MAX_LENGTH);
         assert_eq!(topic.as_ref(), &data[..]);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum")]
+    fn test_topic_exceeds_max_length() {
+        let data = [b'x'; Topic::MAX_LENGTH + 1];
+        Topic::new(&data);
     }
 
     #[test]
@@ -264,8 +311,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_max_topic() {
-        // Wire format uses 6 bits for topic length, so max is 63 bytes
-        let data = [b'T'; 63];
+        let data = [b'T'; Topic::MAX_LENGTH];
         let topic = Topic::new(&data);
         let msgs = [
             Message::Subscribe(topic),
