@@ -15,6 +15,7 @@ use libp2p::swarm::handler::{
     StreamUpgradeError,
 };
 use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, StreamProtocol, SubstreamProtocol};
+use tracing::{debug, trace, warn};
 
 use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
 use crate::protocol::{Config, Message};
@@ -55,12 +56,14 @@ pub struct Handler {
     outbound_substream_requested: bool,
 }
 
+type SubstreamFuture<T> = BoxFuture<'static, (Substream, io::Result<T>)>;
+
 /// State of the inbound substream.
 enum InboundState {
     /// No inbound substream yet.
     None,
     /// Waiting for the next message.
-    Reading(BoxFuture<'static, (Substream, io::Result<Message>)>),
+    Reading(SubstreamFuture<Message>),
 }
 
 /// State of the outbound substream.
@@ -70,9 +73,16 @@ enum OutboundState {
     /// We have a substream ready to send messages.
     Ready(Substream),
     /// Currently sending a message.
-    Sending(BoxFuture<'static, (Substream, io::Result<()>)>),
+    Sending(SubstreamFuture<()>),
     /// The substream has been closed or errored.
     Closed,
+}
+
+impl OutboundState {
+    /// Take the outbound state, leaving None in its place.
+    fn take(&mut self) -> Self {
+        std::mem::replace(self, OutboundState::None)
+    }
 }
 
 /// A negotiated substream.
@@ -94,6 +104,8 @@ impl Handler {
 
     /// Start reading from an inbound substream.
     fn start_inbound_read(&mut self, mut stream: Substream) {
+        trace!("Starting inbound read on substream");
+
         let max_buf_size = self.config.max_buf_size;
         self.inbound = InboundState::Reading(Box::pin(async move {
             let result = read_message(&mut stream, max_buf_size).await;
@@ -103,6 +115,8 @@ impl Handler {
 
     /// Start sending a message on the outbound substream.
     fn start_outbound_send(&mut self, mut stream: Substream, message: Message) {
+        trace!(?message, "Starting outbound send on substream");
+
         self.outbound = OutboundState::Sending(Box::pin(async move {
             let result = send_message(&mut stream, &message).await;
             (stream, result)
@@ -131,9 +145,16 @@ impl ConnectionHandler for Handler {
     fn on_behaviour_event(&mut self, message: Self::FromBehaviour) {
         // Drop messages if queue is full
         if self.pending_messages.len() >= MAX_QUEUE_SIZE {
-            tracing::warn!("Dropping message: queue full");
+            warn!("Dropping message: queue full");
             return;
         }
+
+        trace!(
+            ?message,
+            queue_len = self.pending_messages.len(),
+            "Queueing message from behaviour"
+        );
+
         self.pending_messages.push_back(message);
     }
 
@@ -152,6 +173,7 @@ impl ConnectionHandler for Handler {
                 ..
             }) => {
                 // We got an inbound substream, start reading from it
+                trace!("Inbound substream negotiated, starting read");
                 self.start_inbound_read(stream);
             }
 
@@ -165,8 +187,13 @@ impl ConnectionHandler for Handler {
 
                 // If we have pending messages, start sending immediately
                 if let Some(message) = self.pending_messages.pop_front() {
+                    trace!(
+                        ?message,
+                        "Outbound substream negotiated, sending queued message"
+                    );
                     self.start_outbound_send(stream, message);
                 } else {
+                    trace!("Outbound substream negotiated, no pending messages");
                     self.outbound = OutboundState::Ready(stream);
                 }
             }
@@ -177,23 +204,25 @@ impl ConnectionHandler for Handler {
 
                 match error {
                     StreamUpgradeError::Timeout => {
-                        tracing::debug!("Outbound substream upgrade timed out");
+                        debug!("Outbound substream upgrade timed out");
                     }
                     StreamUpgradeError::NegotiationFailed => {
-                        tracing::debug!("Outbound substream protocol negotiation failed");
+                        debug!("Outbound substream protocol negotiation failed");
                     }
                     StreamUpgradeError::Io(e) => {
-                        tracing::debug!("Outbound substream I/O error: {}", e);
+                        debug!("Outbound substream I/O error: {}", e);
                     }
                     StreamUpgradeError::Apply(v) => match v {},
                 }
 
                 if self.outbound_substream_attempts >= MAX_SUBSTREAM_ATTEMPTS {
-                    tracing::warn!(
+                    warn!(
                         "Failed to open outbound substream after {} attempts, giving up",
                         MAX_SUBSTREAM_ATTEMPTS
                     );
+
                     self.outbound = OutboundState::Closed;
+
                     // Clear pending messages since we can't send them
                     self.pending_messages.clear();
                 }
@@ -201,7 +230,7 @@ impl ConnectionHandler for Handler {
 
             ConnectionEvent::ListenUpgradeError(_) => {
                 // Inbound upgrade errors are not fatal, we just wait for another inbound stream
-                tracing::debug!("Inbound substream upgrade failed");
+                debug!("Inbound substream upgrade failed");
             }
 
             _ => {}
@@ -214,6 +243,14 @@ impl ConnectionHandler for Handler {
     ) -> Poll<
         ConnectionHandlerEvent<Self::OutboundProtocol, Self::OutboundOpenInfo, Self::ToBehaviour>,
     > {
+        trace!(
+            pending_messages = self.pending_messages.len(),
+            pending_events = self.pending_events.len(),
+            inbound_state = ?matches!(&self.inbound, InboundState::Reading(_)),
+            outbound_state = ?std::mem::discriminant(&self.outbound),
+            "Handler::poll called"
+        );
+
         // First, emit any pending events
         if let Some(event) = self.pending_events.pop_front() {
             return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
@@ -222,22 +259,29 @@ impl ConnectionHandler for Handler {
         // Poll the inbound substream
         match &mut self.inbound {
             InboundState::Reading(future) => {
+                trace!("Polling inbound substream for messages");
+
                 if let Poll::Ready((stream, result)) = future.poll_unpin(cx) {
                     match result {
                         Ok(message) => {
                             // Successfully read a message, continue reading
+                            trace!(?message, "Received message on inbound substream");
+
                             self.pending_events
                                 .push_back(HandlerEvent::Received(message));
+
                             self.start_inbound_read(stream);
                         }
                         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                             // Stream was closed gracefully by remote
-                            tracing::debug!("Inbound substream closed by remote");
+                            debug!("Inbound substream closed by remote");
+
                             self.inbound = InboundState::None;
                         }
                         Err(e) => {
                             // Error reading from stream
-                            tracing::debug!("Error reading from inbound substream: {}", e);
+                            debug!("Error reading from inbound substream: {e}");
+
                             self.pending_events.push_back(HandlerEvent::Error(e));
                             self.inbound = InboundState::None;
                         }
@@ -253,12 +297,15 @@ impl ConnectionHandler for Handler {
         }
 
         // Poll the outbound substream
-        match std::mem::replace(&mut self.outbound, OutboundState::None) {
+        match self.outbound.take() {
             OutboundState::Sending(mut future) => {
                 match future.poll_unpin(cx) {
                     Poll::Ready((stream, Ok(()))) => {
                         // Successfully sent, check for more messages
+                        trace!("Message sent successfully on outbound substream");
+
                         if let Some(message) = self.pending_messages.pop_front() {
+                            trace!(?message, "Sending next queued message");
                             self.start_outbound_send(stream, message);
                         } else {
                             self.outbound = OutboundState::Ready(stream);
@@ -266,7 +313,7 @@ impl ConnectionHandler for Handler {
                     }
                     Poll::Ready((_, Err(e))) => {
                         // Error sending, need to reopen substream
-                        tracing::debug!("Error sending on outbound substream: {}", e);
+                        debug!("Error sending on outbound substream: {}", e);
                         self.outbound = OutboundState::None;
                         // Don't clear pending messages, we'll retry with a new substream
                     }
@@ -279,6 +326,7 @@ impl ConnectionHandler for Handler {
             OutboundState::Ready(stream) => {
                 // If we have pending messages, start sending
                 if let Some(message) = self.pending_messages.pop_front() {
+                    trace!(?message, "Outbound ready, sending queued message");
                     self.start_outbound_send(stream, message);
                 } else {
                     self.outbound = OutboundState::Ready(stream);
@@ -291,7 +339,13 @@ impl ConnectionHandler for Handler {
                     && !self.outbound_substream_requested
                     && self.outbound_substream_attempts < MAX_SUBSTREAM_ATTEMPTS
                 {
+                    trace!(
+                        pending_count = self.pending_messages.len(),
+                        "Requesting outbound substream for pending messages"
+                    );
+
                     self.outbound_substream_requested = true;
+
                     return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                         protocol: SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ()),
                     });

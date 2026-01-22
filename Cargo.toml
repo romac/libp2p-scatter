@@ -15,3 +15,9 @@ libp2p = "0.56"
 unsigned-varint = "0.8"
 prometheus-client = "0.23.1"
 tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "tokio"] }
+test-log = { version = "0.2.19", default-features = false, features = ["color", "trace"] }
