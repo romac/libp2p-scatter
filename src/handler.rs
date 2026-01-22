@@ -296,64 +296,74 @@ impl ConnectionHandler for Handler {
             InboundState::None => {}
         }
 
-        // Poll the outbound substream
-        match self.outbound.take() {
-            OutboundState::Sending(mut future) => {
-                match future.poll_unpin(cx) {
-                    Poll::Ready((stream, Ok(()))) => {
-                        // Successfully sent, check for more messages
-                        trace!("Message sent successfully on outbound substream");
+        // Poll the outbound substream in a loop to handle state transitions
+        loop {
+            match self.outbound.take() {
+                OutboundState::Sending(mut future) => {
+                    match future.poll_unpin(cx) {
+                        Poll::Ready((stream, Ok(()))) => {
+                            // Successfully sent, check for more messages
+                            trace!("Message sent successfully on outbound substream");
 
-                        if let Some(message) = self.pending_messages.pop_front() {
-                            trace!(?message, "Sending next queued message");
-                            self.start_outbound_send(stream, message);
-                        } else {
-                            self.outbound = OutboundState::Ready(stream);
+                            if let Some(message) = self.pending_messages.pop_front() {
+                                trace!(?message, "Sending next queued message");
+                                self.start_outbound_send(stream, message);
+                                // Continue loop to poll the new Sending future
+                            } else {
+                                self.outbound = OutboundState::Ready(stream);
+                                break;
+                            }
+                        }
+                        Poll::Ready((_, Err(e))) => {
+                            // Error sending, need to reopen substream
+                            debug!("Error sending on outbound substream: {}", e);
+                            self.outbound = OutboundState::None;
+                            // Don't clear pending messages, we'll retry with a new substream
+                            // Continue loop to potentially request new substream
+                        }
+                        Poll::Pending => {
+                            self.outbound = OutboundState::Sending(future);
+                            break;
                         }
                     }
-                    Poll::Ready((_, Err(e))) => {
-                        // Error sending, need to reopen substream
-                        debug!("Error sending on outbound substream: {}", e);
-                        self.outbound = OutboundState::None;
-                        // Don't clear pending messages, we'll retry with a new substream
+                }
+
+                OutboundState::Ready(stream) => {
+                    // If we have pending messages, start sending
+                    if let Some(message) = self.pending_messages.pop_front() {
+                        trace!(?message, "Outbound ready, sending queued message");
+                        self.start_outbound_send(stream, message);
+                        // Continue loop to poll the new Sending future
+                    } else {
+                        self.outbound = OutboundState::Ready(stream);
+                        break;
                     }
-                    Poll::Pending => {
-                        self.outbound = OutboundState::Sending(future);
+                }
+
+                OutboundState::None => {
+                    // Request a new outbound substream if we have messages and haven't given up
+                    if !self.pending_messages.is_empty()
+                        && !self.outbound_substream_requested
+                        && self.outbound_substream_attempts < MAX_SUBSTREAM_ATTEMPTS
+                    {
+                        trace!(
+                            pending_count = self.pending_messages.len(),
+                            "Requesting outbound substream for pending messages"
+                        );
+
+                        self.outbound_substream_requested = true;
+
+                        return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
+                            protocol: SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ()),
+                        });
                     }
+                    break;
                 }
-            }
 
-            OutboundState::Ready(stream) => {
-                // If we have pending messages, start sending
-                if let Some(message) = self.pending_messages.pop_front() {
-                    trace!(?message, "Outbound ready, sending queued message");
-                    self.start_outbound_send(stream, message);
-                } else {
-                    self.outbound = OutboundState::Ready(stream);
+                OutboundState::Closed => {
+                    self.outbound = OutboundState::Closed;
+                    break;
                 }
-            }
-
-            OutboundState::None => {
-                // Request a new outbound substream if we have messages and haven't given up
-                if !self.pending_messages.is_empty()
-                    && !self.outbound_substream_requested
-                    && self.outbound_substream_attempts < MAX_SUBSTREAM_ATTEMPTS
-                {
-                    trace!(
-                        pending_count = self.pending_messages.len(),
-                        "Requesting outbound substream for pending messages"
-                    );
-
-                    self.outbound_substream_requested = true;
-
-                    return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-                        protocol: SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ()),
-                    });
-                }
-            }
-
-            OutboundState::Closed => {
-                self.outbound = OutboundState::Closed;
             }
         }
 

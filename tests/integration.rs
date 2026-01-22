@@ -82,18 +82,18 @@ async fn test_broadcast_delivery() {
 
     info!("A saw B's subscription");
 
-    // // Now A subscribes too (so A is known to B for the topic)
-    // swarm_a.behaviour_mut().subscribe(topic);
+    // Now A subscribes too (so A is known to B for the topic)
+    swarm_a.behaviour_mut().subscribe(topic);
 
-    // // Wait for B to see A's subscription
-    // wait_for_scatter_event(
-    //     &mut swarm_a,
-    //     &mut swarm_b,
-    //     Target::B,
-    //     |e| matches!(e, Event::Subscribed(p, t) if *p == peer_a && *t == topic),
-    // )
-    // .await
-    // .expect("Timeout waiting for subscription");
+    // Wait for B to see A's subscription
+    wait_for_scatter_event(
+        &mut swarm_a,
+        &mut swarm_b,
+        Target::B,
+        |e| matches!(e, Event::Subscribed(p, t) if *p == peer_a && *t == topic),
+    )
+    .await
+    .expect("Timeout waiting for subscription");
 
     // A broadcasts
     swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
@@ -344,9 +344,9 @@ async fn test_multiple_topics() {
     let peer_a = *swarm_a.local_peer_id();
     let peer_b = *swarm_b.local_peer_id();
 
-    // // A subscribes to both topics
-    // swarm_a.behaviour_mut().subscribe(topic1);
-    // swarm_a.behaviour_mut().subscribe(topic2);
+    // A subscribes to both topics
+    swarm_a.behaviour_mut().subscribe(topic1);
+    swarm_a.behaviour_mut().subscribe(topic2);
 
     // B should see both subscriptions
     let mut sub1 = false;
@@ -445,17 +445,17 @@ async fn test_empty_payload_broadcast() {
     )
     .await;
 
-    // // A subscribes so A knows B is subscribed to topic
-    // swarm_a.behaviour_mut().subscribe(topic);
-    //
-    // // Wait for B to see A's subscription
-    // wait_for_scatter_event(
-    //     &mut swarm_a,
-    //     &mut swarm_b,
-    //     Target::B,
-    //     |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
-    // )
-    // .await;
+    // A subscribes so A knows B is subscribed to topic
+    swarm_a.behaviour_mut().subscribe(topic);
+
+    // Wait for B to see A's subscription
+    wait_for_scatter_event(
+        &mut swarm_a,
+        &mut swarm_b,
+        Target::B,
+        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
+    )
+    .await;
 
     // A broadcasts empty payload
     swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
@@ -494,17 +494,17 @@ async fn test_large_payload_broadcast() {
     )
     .await;
 
-    // // A subscribes
-    // swarm_a.behaviour_mut().subscribe(topic);
-    //
-    // // Wait for B to see A's subscription
-    // wait_for_scatter_event(
-    //     &mut swarm_a,
-    //     &mut swarm_b,
-    //     Target::B,
-    //     |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
-    // )
-    // .await;
+    // A subscribes
+    swarm_a.behaviour_mut().subscribe(topic);
+
+    // Wait for B to see A's subscription
+    wait_for_scatter_event(
+        &mut swarm_a,
+        &mut swarm_b,
+        Target::B,
+        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
+    )
+    .await;
 
     // A broadcasts large payload
     swarm_a.behaviour_mut().broadcast(&topic, payload.clone());
@@ -541,16 +541,16 @@ async fn test_multiple_broadcasts_in_sequence() {
     .await;
 
     // A subscribes
-    // swarm_a.behaviour_mut().subscribe(topic);
-    //
-    // // Wait for B to see A's subscription
-    // wait_for_scatter_event(
-    //     &mut swarm_a,
-    //     &mut swarm_b,
-    //     Target::B,
-    //     |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
-    // )
-    // .await;
+    swarm_a.behaviour_mut().subscribe(topic);
+
+    // Wait for B to see A's subscription
+    wait_for_scatter_event(
+        &mut swarm_a,
+        &mut swarm_b,
+        Target::B,
+        |e| matches!(e, Event::Subscribed(p, _) if *p == peer_a),
+    )
+    .await;
 
     // A sends multiple messages
     let messages: Vec<Bytes> = (0..5)
