@@ -9,18 +9,21 @@ use libp2p::swarm::{
     CloseConnection, ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId};
-use prometheus_client::registry::Registry;
 
 use crate::handler::Handler;
 use crate::protocol::Message;
 
 mod handler;
 mod length_prefixed;
-mod metrics;
 mod protocol;
 
-pub use metrics::Metrics;
 pub use protocol::{Config, Topic};
+
+#[cfg(feature = "metrics")]
+mod metrics;
+
+#[cfg(feature = "metrics")]
+pub use metrics::{Metrics, Registry};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
@@ -36,6 +39,8 @@ pub struct Behaviour {
     peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
     topics: FnvHashMap<Topic, FnvHashSet<PeerId>>,
     events: VecDeque<ToSwarm<Event, Message>>,
+
+    #[cfg(feature = "metrics")]
     metrics: Option<Metrics>,
 }
 
@@ -58,6 +63,7 @@ impl Behaviour {
         }
     }
 
+    #[cfg(feature = "metrics")]
     pub fn new_with_metrics(config: Config, registry: &mut Registry) -> Self {
         Self {
             config,
@@ -89,6 +95,7 @@ impl Behaviour {
             });
         }
 
+        #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
             metrics.subscribe(&topic);
         }
@@ -107,6 +114,7 @@ impl Behaviour {
             }
         }
 
+        #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
             metrics.unsubscribe(topic);
         }
@@ -124,6 +132,7 @@ impl Behaviour {
             }
         }
 
+        #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
             metrics.msg_sent(topic, msg.len());
             metrics.register_published_message(topic);
@@ -204,32 +213,41 @@ impl NetworkBehaviour for Behaviour {
 
         match event {
             HandlerEvent::Received(Subscribe(topic)) => {
-                let peers = self.topics.entry(topic).or_default();
-                self.peers.entry(peer).or_default().insert(topic);
-                peers.insert(peer);
+                #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.inc_topic_peers(&topic);
                 }
+
+                let peers = self.topics.entry(topic).or_default();
+                self.peers.entry(peer).or_default().insert(topic);
+                peers.insert(peer);
+
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Subscribed(peer, topic)));
             }
 
             HandlerEvent::Received(Broadcast(topic, msg)) => {
+                #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.msg_received(&topic, msg.len());
                 }
+
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Received(peer, topic, msg)));
             }
 
             HandlerEvent::Received(Unsubscribe(topic)) => {
                 self.peers.entry(peer).or_default().remove(&topic);
+
                 if let Some(peers) = self.topics.get_mut(&topic) {
                     peers.remove(&peer);
                 }
+
+                #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.dec_topic_peers(&topic);
                 }
+
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(peer, topic)));
             }

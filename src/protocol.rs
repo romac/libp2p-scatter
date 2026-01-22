@@ -1,11 +1,9 @@
-use std::fmt;
 use std::io::{Error, ErrorKind, Result};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
-use prometheus_client::encoding::{EncodeLabelSet, LabelSetEncoder};
 
 use crate::length_prefixed::{read_length_prefixed, write_length_prefixed};
 
@@ -27,20 +25,6 @@ impl Topic {
             len: topic.len() as _,
             bytes,
         }
-    }
-}
-
-impl EncodeLabelSet for Topic {
-    fn encode(&self, mut encoder: LabelSetEncoder) -> fmt::Result {
-        use prometheus_client::encoding::{EncodeLabelKey, EncodeLabelValue};
-
-        let mut label_encoder = encoder.encode_label();
-        let mut key_encoder = label_encoder.encode_label_key()?;
-        EncodeLabelKey::encode(&"topic", &mut key_encoder)?;
-        let mut value_encoder = key_encoder.encode_label_value()?;
-        let value = String::from_utf8_lossy(self.as_ref());
-        EncodeLabelValue::encode(&value, &mut value_encoder)?;
-        value_encoder.finish()
     }
 }
 

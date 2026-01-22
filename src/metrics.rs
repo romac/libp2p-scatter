@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use core::fmt;
 
+use fnv::FnvHashMap as HashMap;
+
+use prometheus_client::encoding::{EncodeLabelSet, LabelSetEncoder};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::registry::Registry;
+
+pub use prometheus_client::registry::Registry;
 
 use crate::Topic;
 
@@ -75,7 +79,7 @@ impl Metrics {
         );
 
         Self {
-            topic_info: HashMap::new(),
+            topic_info: HashMap::default(),
             topic_subscription_status,
             topic_peers_count,
             topic_msg_sent_counts,
@@ -138,6 +142,20 @@ impl Metrics {
         self.topic_msg_recv_bytes
             .get_or_create(topic)
             .inc_by(bytes as u64);
+    }
+}
+
+impl EncodeLabelSet for Topic {
+    fn encode(&self, mut encoder: LabelSetEncoder) -> fmt::Result {
+        use prometheus_client::encoding::{EncodeLabelKey, EncodeLabelValue};
+
+        let mut label_encoder = encoder.encode_label();
+        let mut key_encoder = label_encoder.encode_label_key()?;
+        EncodeLabelKey::encode(&"topic", &mut key_encoder)?;
+        let mut value_encoder = key_encoder.encode_label_value()?;
+        let value = String::from_utf8_lossy(self.as_ref());
+        EncodeLabelValue::encode(&value, &mut value_encoder)?;
+        value_encoder.finish()
     }
 }
 
