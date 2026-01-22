@@ -11,6 +11,31 @@ Implementation of a `rust-libp2p` protocol for broadcast messages to connected p
 
 Originally forked from https://github.com/cloudpeers/libp2p-broadcast.
 
+## API Overview
+
+```rust
+// Create behaviour
+let mut behaviour = Behaviour::new(Config::default());
+
+// Subscribe to topics
+behaviour.subscribe(Topic::new(b"announcements"));
+
+// Broadcast messages
+behaviour.broadcast(&topic, Bytes::from("Hello!"));
+
+// Query subscriptions
+for topic in behaviour.subscribed() {
+    println!("Subscribed to: {topic}");
+}
+
+// Query peers on a topic
+if let Some(peers) = behaviour.peers(&topic) {
+    for peer in peers {
+        println!("Peer: {peer}");
+    }
+}
+```
+
 ## Example
 
 ```rust
