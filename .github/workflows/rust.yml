@@ -20,6 +20,19 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - name: Check formatting
+        uses: actions-rust-lang/rustfmt@v1
+
   test:
     name: Tests
     runs-on: ubuntu-latest
@@ -66,25 +79,9 @@ jobs:
         with:
           components: clippy
       - name: Run clippy
-        uses: actions-rs/clippy@master
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --all-targets
+        run: cargo clippy --all-features --all-targets -- -D warnings
 
-  fmt:
-    name: Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: rustfmt
-      - name: Check formatting
-        uses: actions-rust-lang/rustfmt@v1
-
-  nightly:
+  clippy-nightly:
     name: Clippy (nightly)
     runs-on: ubuntu-latest
     steps:

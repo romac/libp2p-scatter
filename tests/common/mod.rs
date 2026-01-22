@@ -245,13 +245,13 @@ impl TestNetwork {
         let result = timeout(DEFAULT_TIMEOUT, async {
             loop {
                 for (idx, node) in self.nodes.iter_mut().enumerate() {
-                    if let Some(event) = node.swarm.next().now_or_never().flatten() {
-                        if let SwarmEvent::ConnectionEstablished { .. } = event {
-                            if idx == from {
-                                from_connected = true;
-                            } else if idx == to {
-                                to_connected = true;
-                            }
+                    if let Some(SwarmEvent::ConnectionEstablished { .. }) =
+                        node.swarm.next().now_or_never().flatten()
+                    {
+                        if idx == from {
+                            from_connected = true;
+                        } else if idx == to {
+                            to_connected = true;
                         }
                     }
                 }
@@ -334,6 +334,7 @@ impl TestNetwork {
     }
 
     /// Creates fully connected topology: every node connects to every other.
+    #[allow(clippy::needless_range_loop)]
     async fn connect_fully(&mut self) {
         if self.nodes.len() < 2 {
             return;
@@ -345,7 +346,7 @@ impl TestNetwork {
 
         // Each node dials all nodes with higher index
         for i in 0..n {
-            for j in (i + 1)..n {
+            for j in i + 1..n {
                 self.nodes[i]
                     .swarm
                     .dial(addrs[j].clone())
@@ -379,10 +380,12 @@ impl TestNetwork {
         })
         .await;
 
-        result.expect(&format!(
-            "Timeout waiting for connections: got {}, expected {}",
-            connections, expected
-        ));
+        result.unwrap_or_else(|_| {
+            panic!(
+                "Timeout waiting for connections: got {}, expected {}",
+                connections, expected
+            )
+        });
     }
 
     /// Drives all swarms, collecting scatter events until the predicate returns true.
