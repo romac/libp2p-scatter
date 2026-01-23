@@ -100,7 +100,7 @@ impl Metrics {
 
     pub(crate) fn subscribe(&mut self, topic: &Topic) {
         self.register_topic(topic);
-        self.topic_info.entry(*topic).or_insert(false);
+        *self.topic_info.entry(*topic).or_default() = true;
         self.topic_subscription_status.get_or_create(topic).set(1);
     }
 
