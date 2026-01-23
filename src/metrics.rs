@@ -23,14 +23,14 @@ pub struct Metrics {
 
     /// Number of messages sent to each topic.
     topic_msg_sent_counts: Family<Topic, Counter>,
-    /// Bytes from messages sent to each topic.
+    /// Amount of data sent to each topic, in bytes.
     topic_msg_sent_bytes: Family<Topic, Counter>,
     /// Number of messages published to each topic.
     topic_msg_published: Family<Topic, Counter>,
 
     /// Number of messages received on each topic
     topic_msg_recv_counts: Family<Topic, Counter>,
-    /// Bytes received from messages for each topic.
+    /// Amount of data received for each topic, in bytes.
     topic_msg_recv_bytes: Family<Topic, Counter>,
 }
 
@@ -58,24 +58,24 @@ impl Metrics {
 
         let topic_msg_sent_counts = register_family!(
             "topic_msg_sent_counts",
-            "Number of gossip messages sent to each topic"
+            "Number of messages sent to each topic"
         );
         let topic_msg_published = register_family!(
             "topic_msg_published",
-            "Number of gossip messages published to each topic"
+            "Number of messages published to each topic"
         );
         let topic_msg_sent_bytes = register_family!(
             "topic_msg_sent_bytes",
-            "Bytes from gossip messages sent to each topic"
+            "Amount of data sent to each topic, in bytes"
         );
 
         let topic_msg_recv_counts = register_family!(
             "topic_msg_recv_counts",
-            "Number of gossip messages received on each topic"
+            "Number of messages received on each topic"
         );
         let topic_msg_recv_bytes = register_family!(
             "topic_msg_recv_bytes",
-            "Bytes received from gossip messages for each topic"
+            "Amount of data received for each topic, in bytes"
         );
 
         Self {
