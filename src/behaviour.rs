@@ -176,7 +176,17 @@ impl Behaviour {
     }
 
     fn inject_disconnected(&mut self, peer: &PeerId) {
-        self.connected_peers.remove(peer);
+        if let Some(topics) = self.connected_peers.remove(peer) {
+            for topic in topics {
+                self.events
+                    .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(*peer, topic)));
+
+                #[cfg(feature = "metrics")]
+                if let Some(metrics) = &mut self.metrics {
+                    metrics.dec_topic_peers(&topic);
+                }
+            }
+        }
     }
 }
 
