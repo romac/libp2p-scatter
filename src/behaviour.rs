@@ -32,8 +32,8 @@ pub enum Event {
 #[derive(Default)]
 pub struct Behaviour {
     config: Config,
-    subscriptions: FnvHashSet<Topic>,
-    peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
+    connected_peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
+    subscribed_topics: FnvHashSet<Topic>,
     topics: FnvHashMap<Topic, FnvHashSet<PeerId>>,
     events: VecDeque<ToSwarm<Event, Message>>,
 
@@ -45,8 +45,8 @@ impl fmt::Debug for Behaviour {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Behaviour")
             .field("config", &self.config)
-            .field("subscriptions", &self.subscriptions)
-            .field("peers", &self.peers)
+            .field("subscribed_topics", &self.subscribed_topics)
+            .field("connected_peers", &self.connected_peers)
             .field("topics", &self.topics)
             .finish()
     }
@@ -74,7 +74,7 @@ impl Behaviour {
 
     /// Returns an iterator over the topics this node is subscribed to.
     pub fn subscribed(&self) -> impl Iterator<Item = &Topic> + '_ {
-        self.subscriptions.iter()
+        self.subscribed_topics.iter()
     }
 
     /// Returns an iterator over the peers subscribed to the given topic.
@@ -84,73 +84,83 @@ impl Behaviour {
 
     /// Returns an iterator over the topics the given peer is subscribed to.
     pub fn topics(&self, peer: &PeerId) -> Option<impl Iterator<Item = &Topic> + '_> {
-        self.peers.get(peer).map(|topics| topics.iter())
+        self.connected_peers.get(peer).map(|topics| topics.iter())
     }
 
     /// Subscribe to a topic.
-    pub fn subscribe(&mut self, topic: Topic) {
-        self.subscriptions.insert(topic);
+    pub fn subscribe(&mut self, topic: Topic) -> bool {
+        // Already subscribed.
+        if self.subscribed_topics.contains(&topic) {
+            return false;
+        }
 
-        let msg = Message::Subscribe(topic);
-
-        for peer in self.peers.keys() {
+        for peer in self.connected_peers.keys() {
             self.events.push_back(ToSwarm::NotifyHandler {
                 peer_id: *peer,
-                event: msg.clone(),
                 handler: NotifyHandler::Any,
+                event: Message::Subscribe(topic),
             });
         }
+
+        self.subscribed_topics.insert(topic);
 
         #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
             metrics.subscribe(&topic);
         }
+
+        true
     }
 
     /// Unsubscribe from a topic.
-    pub fn unsubscribe(&mut self, topic: &Topic) {
-        self.subscriptions.remove(topic);
-        let msg = Message::Unsubscribe(*topic);
-        if let Some(peers) = self.topics.get(topic) {
-            for peer in peers {
-                self.events.push_back(ToSwarm::NotifyHandler {
-                    peer_id: *peer,
-                    event: msg.clone(),
-                    handler: NotifyHandler::Any,
-                });
-            }
+    pub fn unsubscribe(&mut self, topic: Topic) -> bool {
+        if !self.subscribed_topics.remove(&topic) {
+            return false;
+        }
+
+        for peer in self.connected_peers.keys() {
+            self.events.push_back(ToSwarm::NotifyHandler {
+                peer_id: *peer,
+                handler: NotifyHandler::Any,
+                event: Message::Unsubscribe(topic),
+            });
         }
 
         #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
-            metrics.unsubscribe(topic);
+            metrics.unsubscribe(&topic);
         }
+
+        true
     }
 
-    /// Broadcast a message to all peers subscribed to the given topic.
-    pub fn broadcast(&mut self, topic: &Topic, payload: Bytes) {
-        let payload_len = payload.len();
-        let msg = Message::Broadcast(*topic, payload);
-        if let Some(peers) = self.topics.get(topic) {
-            for peer in peers {
-                self.events.push_back(ToSwarm::NotifyHandler {
-                    peer_id: *peer,
-                    event: msg.clone(),
-                    handler: NotifyHandler::Any,
-                });
+    /// Broadcast a message to all target peers subscribed to the given topic.
+    pub fn broadcast(&mut self, topic: Topic, payload: impl Into<Bytes>) {
+        let payload = payload.into();
+
+        for (peer_id, sub_topic) in &self.connected_peers {
+            // Peer must be subscribed to the topic.
+            if !sub_topic.contains(&topic) {
+                continue;
             }
+
+            self.events.push_back(ToSwarm::NotifyHandler {
+                peer_id: *peer_id,
+                handler: NotifyHandler::Any,
+                event: Message::Broadcast(topic, payload.clone()),
+            });
         }
 
         #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
-            metrics.msg_sent(topic, payload_len);
-            metrics.register_published_message(topic);
+            metrics.msg_sent(&topic, payload.len());
+            metrics.register_published_message(&topic);
         }
     }
 
     fn inject_connected(&mut self, peer: &PeerId) {
-        self.peers.insert(*peer, FnvHashSet::default());
-        for topic in &self.subscriptions {
+        self.connected_peers.insert(*peer, FnvHashSet::default());
+        for topic in &self.subscribed_topics {
             self.events.push_back(ToSwarm::NotifyHandler {
                 peer_id: *peer,
                 event: Message::Subscribe(*topic),
@@ -160,7 +170,7 @@ impl Behaviour {
     }
 
     fn inject_disconnected(&mut self, peer: &PeerId) {
-        if let Some(topics) = self.peers.remove(peer) {
+        if let Some(topics) = self.connected_peers.remove(peer) {
             for topic in topics {
                 if let Some(peers) = self.topics.get_mut(&topic) {
                     peers.remove(peer);
@@ -198,11 +208,13 @@ impl NetworkBehaviour for Behaviour {
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
         match event {
             FromSwarm::ConnectionEstablished(c) => {
+                // We only care about the first time a peer connects.
                 if c.other_established == 0 {
                     self.inject_connected(&c.peer_id);
                 }
             }
             FromSwarm::ConnectionClosed(c) => {
+                // We only care about when the last connection to a peer is closed.
                 if c.remaining_established == 0 {
                     self.inject_disconnected(&c.peer_id);
                 }
@@ -228,7 +240,7 @@ impl NetworkBehaviour for Behaviour {
                 }
 
                 let peers = self.topics.entry(topic).or_default();
-                self.peers.entry(peer).or_default().insert(topic);
+                self.connected_peers.entry(peer).or_default().insert(topic);
                 peers.insert(peer);
 
                 self.events
@@ -246,7 +258,7 @@ impl NetworkBehaviour for Behaviour {
             }
 
             HandlerEvent::Received(Unsubscribe(topic)) => {
-                self.peers.entry(peer).or_default().remove(&topic);
+                self.connected_peers.entry(peer).or_default().remove(&topic);
 
                 if let Some(peers) = self.topics.get_mut(&topic) {
                     peers.remove(&peer);
@@ -359,12 +371,12 @@ mod tests {
 
         fn unsubscribe(&self, topic: &Topic) {
             let mut me = self.behaviour.lock().unwrap();
-            me.unsubscribe(topic);
+            me.unsubscribe(*topic);
         }
 
         fn broadcast(&self, topic: &Topic, msg: Bytes) {
             let mut me = self.behaviour.lock().unwrap();
-            me.broadcast(topic, msg);
+            me.broadcast(*topic, msg);
         }
     }
 
@@ -579,8 +591,7 @@ mod tests {
         // Process A's outbound messages
         assert!(a.next().is_none());
 
-        // B should receive both subscription messages (protocol doesn't dedupe)
-        assert_eq!(b.next().unwrap(), Event::Subscribed(*a.peer_id(), topic));
+        // B should receive only one subscription event
         assert_eq!(b.next().unwrap(), Event::Subscribed(*a.peer_id(), topic));
     }
 
@@ -602,8 +613,8 @@ mod tests {
         a.unsubscribe(&topic);
         assert!(a.next().is_none());
 
-        // B should receive unsubscribe (because A is connected to topic via B's subscription)
-        assert_eq!(b.next().unwrap(), Event::Unsubscribed(*a.peer_id(), topic));
+        // B should not receive unsubscribe (because A was not subscribed)
+        assert!(b.next().is_none());
     }
 
     // ==================== Connection Lifecycle Tests ====================

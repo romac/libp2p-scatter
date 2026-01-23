@@ -42,7 +42,7 @@ async fn test_three_peers_broadcast() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(&topic, payload.clone());
+        .broadcast(topic, payload.clone());
 
     // Both nodes 1 and 2 should receive it
     let events = network
@@ -103,7 +103,7 @@ async fn test_selective_broadcast() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(&topic1, payload.clone());
+        .broadcast(topic1, payload.clone());
 
     // Only node 1 should receive it
     let event = network
@@ -165,7 +165,7 @@ async fn test_large_network_star_broadcast() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(&topic, payload.clone());
+        .broadcast(topic, payload.clone());
 
     // All spoke nodes should receive the broadcast
     let events = network
@@ -232,7 +232,7 @@ async fn test_large_network_ring_topology() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(&topic, payload.clone());
+        .broadcast(topic, payload.clone());
 
     // Wait for neighbors to receive
     let events = network
@@ -316,7 +316,7 @@ async fn test_large_linear_chain_broadcast() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(&topic, payload.clone());
+        .broadcast(topic, payload.clone());
 
     // Wait for node 1 to receive
     let event = network

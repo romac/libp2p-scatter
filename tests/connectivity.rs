@@ -65,7 +65,7 @@ async fn test_unsubscribe_propagates() {
         .await;
 
     // Node 0 unsubscribes
-    network.node_mut(0).behaviour_mut().unsubscribe(&topic);
+    network.node_mut(0).behaviour_mut().unsubscribe(topic);
 
     // Node 1 should receive the unsubscription event
     let event = network
