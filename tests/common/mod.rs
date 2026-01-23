@@ -533,4 +533,57 @@ impl TestNetwork {
             total_edges
         );
     }
+
+    /// Disconnects a node from all its peers by closing all connections.
+    /// Returns the number of connections that were closed.
+    pub async fn disconnect_node(&mut self, node_index: usize) -> usize {
+        let node = &mut self.nodes[node_index];
+        let connected_peers: Vec<PeerId> = node.swarm.connected_peers().copied().collect();
+        let count = connected_peers.len();
+
+        for peer_id in connected_peers {
+            let _ = node.swarm.disconnect_peer_id(peer_id);
+        }
+
+        // Wait for disconnections to propagate
+        if count > 0 {
+            let expected_disconnections = count * 2; // Both sides see the disconnection
+            let mut disconnections = 0;
+
+            let result = timeout(Duration::from_secs(2), async {
+                loop {
+                    for node in self.nodes.iter_mut() {
+                        while let Some(event) = node.swarm.next().now_or_never().flatten() {
+                            if let SwarmEvent::ConnectionClosed { .. } = event {
+                                disconnections += 1;
+                            }
+                        }
+                    }
+
+                    if disconnections >= expected_disconnections {
+                        break;
+                    }
+
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+
+            if result.is_err() {
+                tracing::warn!(
+                    "Timeout waiting for disconnections: got {}, expected {}",
+                    disconnections,
+                    expected_disconnections
+                );
+            }
+        }
+
+        count
+    }
+
+    /// Checks if node at `from_index` is connected to node at `to_index`.
+    pub fn is_connected(&self, from_index: usize, to_index: usize) -> bool {
+        let to_peer_id = self.nodes[to_index].peer_id();
+        self.nodes[from_index].swarm.is_connected(&to_peer_id)
+    }
 }
