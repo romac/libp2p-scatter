@@ -1,7 +1,5 @@
 //! Tests for connection lifecycle, disconnections, and state cleanup.
 
-mod common;
-
 use libp2p_scatter::{Event, Topic};
 
 use crate::common::TestNetwork;
@@ -28,7 +26,10 @@ async fn test_disconnect_clears_peer_subscriptions() {
     // Verify node 0 tracks node 1 as subscribed to the topic
     {
         let peers: Vec<_> = network.node(0).behaviour().peers(topic).collect();
-        assert!(peers.contains(&peer_1), "Node 0 should track node 1 as subscribed");
+        assert!(
+            peers.contains(&peer_1),
+            "Node 0 should track node 1 as subscribed"
+        );
     }
 
     // Disconnect node 1 from the network
@@ -128,10 +129,7 @@ async fn test_reconnect_after_disconnect() {
 
     // Wait for node 0 to see the subscription
     network
-        .wait_for_event_on(
-            0,
-            |e| matches!(e, Event::Subscribed(p, _) if *p == peer_1),
-        )
+        .wait_for_event_on(0, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_1))
         .await;
 
     // Disconnect
@@ -204,9 +202,16 @@ async fn test_disconnect_one_of_many_peers() {
     // Verify hub still tracks nodes 1 and 3, but not node 2
     {
         let peers: Vec<_> = network.node(0).behaviour().peers(topic).collect();
-        assert_eq!(peers.len(), 2, "Should have 2 peers after disconnecting one");
+        assert_eq!(
+            peers.len(),
+            2,
+            "Should have 2 peers after disconnecting one"
+        );
         assert!(peers.contains(&peer_1), "Should still track peer 1");
-        assert!(!peers.contains(&peer_2), "Should not track disconnected peer 2");
+        assert!(
+            !peers.contains(&peer_2),
+            "Should not track disconnected peer 2"
+        );
         assert!(peers.contains(&peer_3), "Should still track peer 3");
     }
 }

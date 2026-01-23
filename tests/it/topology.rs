@@ -1,7 +1,5 @@
 //! Tests for multi-node network topologies and routing.
 
-mod common;
-
 use std::time::Duration;
 
 use bytes::Bytes;

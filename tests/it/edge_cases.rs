@@ -1,7 +1,5 @@
 //! Tests for edge cases and boundary conditions.
 
-mod common;
-
 use bytes::Bytes;
 use libp2p_scatter::{Event, Topic};
 

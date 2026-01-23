@@ -1,7 +1,5 @@
 //! Tests for the TestNetwork infrastructure itself.
 
-mod common;
-
 use crate::common::TestNetwork;
 
 #[tokio::test]

@@ -1,7 +1,5 @@
 //! Tests for basic connectivity and subscription/unsubscription mechanics.
 
-mod common;
-
 use libp2p_scatter::{Event, Topic};
 
 use crate::common::TestNetwork;
