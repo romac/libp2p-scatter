@@ -118,7 +118,11 @@ impl Metrics {
     /// Decrease the number of peers that are subscribed to this topic.
     pub(crate) fn dec_topic_peers(&mut self, topic: &Topic) {
         self.register_topic(topic);
-        self.topic_peers_count.get_or_create(topic).dec();
+
+        let gauge = self.topic_peers_count.get_or_create(topic);
+        if gauge.get() > 0 {
+            gauge.dec();
+        }
     }
 
     pub(crate) fn register_published_message(&mut self, topic: &Topic) {
