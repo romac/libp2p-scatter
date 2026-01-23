@@ -127,8 +127,9 @@ impl Behaviour {
     }
 
     /// Broadcast a message to all peers subscribed to the given topic.
-    pub fn broadcast(&mut self, topic: &Topic, msg: Bytes) {
-        let msg = Message::Broadcast(*topic, msg);
+    pub fn broadcast(&mut self, topic: &Topic, payload: Bytes) {
+        let payload_len = payload.len();
+        let msg = Message::Broadcast(*topic, payload);
         if let Some(peers) = self.topics.get(topic) {
             for peer in peers {
                 self.events.push_back(ToSwarm::NotifyHandler {
@@ -141,7 +142,7 @@ impl Behaviour {
 
         #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
-            metrics.msg_sent(topic, msg.len());
+            metrics.msg_sent(topic, payload_len);
             metrics.register_published_message(topic);
         }
     }
