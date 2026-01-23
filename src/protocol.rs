@@ -122,29 +122,6 @@ impl Message {
     }
 }
 
-/// Configuration options for the scatter protocol.
-#[derive(Clone, Debug)]
-pub struct Config {
-    /// Maximum allowed size for messages, in bytes.
-    pub max_message_size: usize,
-}
-
-impl Config {
-    /// Sets the maximum allowed size for messages, in bytes.
-    pub fn max_message_size(mut self, max_message_size: usize) -> Self {
-        self.max_message_size = max_message_size;
-        self
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            max_message_size: 1024 * 1024 * 4, // 4 MiB
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
@@ -352,19 +329,5 @@ mod tests {
         assert_eq!(bytes[0], 17);
         assert_eq!(&bytes[1..5], b"test");
         assert_eq!(&bytes[5..], b"data");
-    }
-
-    // ==================== Config Tests ====================
-
-    #[test]
-    fn test_config_default() {
-        let config = Config::default();
-        assert_eq!(config.max_message_size, 4 * 1024 * 1024); // 4 MiB
-    }
-
-    #[test]
-    fn test_config_builder() {
-        let config = Config::default().max_message_size(1024);
-        assert_eq!(config.max_message_size, 1024);
     }
 }

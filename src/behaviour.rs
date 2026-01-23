@@ -10,8 +10,9 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, PeerId};
 
+use crate::Config;
 use crate::handler::Handler;
-use crate::protocol::{Config, Message, Topic};
+use crate::protocol::{Message, Topic};
 
 #[cfg(feature = "metrics")]
 use crate::metrics::{Metrics, Registry};
