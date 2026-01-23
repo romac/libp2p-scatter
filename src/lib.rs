@@ -16,6 +16,9 @@ pub mod metrics;
 pub struct Config {
     /// Maximum allowed size for messages, in bytes.
     pub max_message_size: usize,
+
+    /// Maximum number of pending messages in the outbound queue.
+    pub max_outbound_queue_size: usize,
 }
 
 impl Config {
@@ -24,12 +27,19 @@ impl Config {
         self.max_message_size = max_message_size;
         self
     }
+
+    /// Sets the maximum number of pending messages in the outbound queue.
+    pub fn max_outbound_queue_size(mut self, max_outbound_queue_size: usize) -> Self {
+        self.max_outbound_queue_size = max_outbound_queue_size;
+        self
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             max_message_size: 1024 * 1024 * 4, // 4 MiB
+            max_outbound_queue_size: 1024,     // 1024 messages
         }
     }
 }

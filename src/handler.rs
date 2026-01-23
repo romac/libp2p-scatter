@@ -27,9 +27,6 @@ const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter/1.0
 /// Maximum number of attempts to open an outbound substream before giving up.
 const MAX_SUBSTREAM_ATTEMPTS: usize = 5;
 
-/// Maximum number of pending outbound messages.
-const MAX_QUEUE_SIZE: usize = 1024;
-
 /// Event sent from the handler to the behaviour.
 #[derive(Debug)]
 pub enum HandlerEvent {
@@ -145,7 +142,7 @@ impl ConnectionHandler for Handler {
 
     fn on_behaviour_event(&mut self, message: Self::FromBehaviour) {
         // Drop messages if queue is full
-        if self.pending_messages.len() >= MAX_QUEUE_SIZE {
+        if self.pending_messages.len() >= self.config.max_outbound_queue_size {
             warn!("Dropping message: queue full");
             return;
         }
@@ -443,15 +440,17 @@ mod tests {
         let mut handler = Handler::default();
         let topic = Topic::new(b"topic");
 
+        let max_queue_size = handler.config.max_outbound_queue_size;
+
         // Fill the queue to capacity
-        for _ in 0..MAX_QUEUE_SIZE {
+        for _ in 0..max_queue_size {
             handler.on_behaviour_event(Message::Subscribe(topic));
         }
-        assert_eq!(handler.pending_messages.len(), MAX_QUEUE_SIZE);
+        assert_eq!(handler.pending_messages.len(), max_queue_size);
 
         // Try to add one more - should be dropped
         handler.on_behaviour_event(Message::Unsubscribe(topic));
-        assert_eq!(handler.pending_messages.len(), MAX_QUEUE_SIZE);
+        assert_eq!(handler.pending_messages.len(), max_queue_size);
 
         // Verify all messages are Subscribe (the Unsubscribe was dropped)
         for msg in &handler.pending_messages {
