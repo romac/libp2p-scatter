@@ -34,7 +34,6 @@ pub struct Behaviour {
     config: Config,
     connected_peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
     subscribed_topics: FnvHashSet<Topic>,
-    topics: FnvHashMap<Topic, FnvHashSet<PeerId>>,
     events: VecDeque<ToSwarm<Event, Message>>,
 
     #[cfg(feature = "metrics")]
@@ -47,7 +46,6 @@ impl fmt::Debug for Behaviour {
             .field("config", &self.config)
             .field("subscribed_topics", &self.subscribed_topics)
             .field("connected_peers", &self.connected_peers)
-            .field("topics", &self.topics)
             .finish()
     }
 }
@@ -73,13 +71,21 @@ impl Behaviour {
     }
 
     /// Returns an iterator over the topics this node is subscribed to.
-    pub fn subscribed(&self) -> impl Iterator<Item = &Topic> + '_ {
-        self.subscribed_topics.iter()
+    pub fn subscribed(&self) -> impl Iterator<Item = Topic> + '_ {
+        self.subscribed_topics.iter().copied()
     }
 
     /// Returns an iterator over the peers subscribed to the given topic.
-    pub fn peers(&self, topic: &Topic) -> Option<impl Iterator<Item = &PeerId> + '_> {
-        self.topics.get(topic).map(|peers| peers.iter())
+    pub fn peers(&self, topic: Topic) -> impl Iterator<Item = PeerId> + '_ {
+        self.connected_peers
+            .iter()
+            .filter_map(move |(peer_id, topics)| {
+                if topics.contains(&topic) {
+                    Some(*peer_id)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Returns an iterator over the topics the given peer is subscribed to.
@@ -170,13 +176,7 @@ impl Behaviour {
     }
 
     fn inject_disconnected(&mut self, peer: &PeerId) {
-        if let Some(topics) = self.connected_peers.remove(peer) {
-            for topic in topics {
-                if let Some(peers) = self.topics.get_mut(&topic) {
-                    peers.remove(peer);
-                }
-            }
-        }
+        self.connected_peers.remove(peer);
     }
 }
 
@@ -239,9 +239,7 @@ impl NetworkBehaviour for Behaviour {
                     metrics.inc_topic_peers(&topic);
                 }
 
-                let peers = self.topics.entry(topic).or_default();
                 self.connected_peers.entry(peer).or_default().insert(topic);
-                peers.insert(peer);
 
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Subscribed(peer, topic)));
@@ -259,10 +257,6 @@ impl NetworkBehaviour for Behaviour {
 
             HandlerEvent::Received(Unsubscribe(topic)) => {
                 self.connected_peers.entry(peer).or_default().remove(&topic);
-
-                if let Some(peers) = self.topics.get_mut(&topic) {
-                    peers.remove(&peer);
-                }
 
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
@@ -636,7 +630,7 @@ mod tests {
         // Verify B is in A's topics map for this topic
         {
             let behaviour = a.behaviour.lock().unwrap();
-            let peers: Vec<_> = behaviour.peers(&topic).unwrap().copied().collect();
+            let peers: Vec<_> = behaviour.peers(topic).collect();
             assert!(peers.contains(&b_peer_id));
         }
 
@@ -650,10 +644,7 @@ mod tests {
         {
             let behaviour = a.behaviour.lock().unwrap();
             // Either the topic has no peers or B is not in the list
-            let peers: Vec<_> = behaviour
-                .peers(&topic)
-                .map(|p| p.copied().collect())
-                .unwrap_or_default();
+            let peers: Vec<_> = behaviour.peers(topic).collect();
             assert!(!peers.contains(&b_peer_id));
         }
     }
@@ -731,7 +722,7 @@ mod tests {
         a.subscribe(topic2);
 
         let behaviour = a.behaviour.lock().unwrap();
-        let subscribed: Vec<_> = behaviour.subscribed().copied().collect();
+        let subscribed: Vec<_> = behaviour.subscribed().collect();
         assert!(subscribed.contains(&topic1));
         assert!(subscribed.contains(&topic2));
         assert_eq!(subscribed.len(), 2);
@@ -760,7 +751,7 @@ mod tests {
         assert_eq!(a.next().unwrap(), Event::Subscribed(*c.peer_id(), topic));
 
         let behaviour = a.behaviour.lock().unwrap();
-        let peers: Vec<_> = behaviour.peers(&topic).unwrap().copied().collect();
+        let peers: Vec<_> = behaviour.peers(topic).collect();
         assert!(peers.contains(b.peer_id()));
         assert!(peers.contains(c.peer_id()));
         assert_eq!(peers.len(), 2);
