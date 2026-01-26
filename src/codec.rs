@@ -1,90 +1,10 @@
-use std::io::{self, Write};
+use std::io;
 
-use bytes::Bytes;
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use ::unsigned_varint::codec::UviBytes;
+use asynchronous_codec::{Decoder, Encoder};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::protocol::{Message, Topic};
-
-/// Reads a length-prefixed message from the given socket.
-///
-/// The `max_size` parameter is the maximum size in bytes of the message that we accept. This is
-/// necessary in order to avoid DoS attacks where the remote sends us a message of several
-/// gigabytes.
-///
-/// # Note
-/// Assumes that a variable-length prefix indicates the length of the message.
-/// This is compatible with what [`write_length_prefixed`] does.
-pub async fn read_length_prefixed<S>(socket: &mut S, max_size: usize) -> io::Result<Vec<u8>>
-where
-    S: AsyncRead + Unpin,
-{
-    let len = read_varint(socket).await?;
-    if len > max_size {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Received data size ({len} bytes) exceeds maximum ({max_size} bytes)"),
-        ));
-    }
-
-    let mut buf = vec![0; len];
-    socket.read_exact(&mut buf).await?;
-
-    Ok(buf)
-}
-
-/// Reads a variable-length integer from the `socket`.
-///
-/// # Note
-/// This function reads bytes one by one from the `socket`.
-/// It is therefore encouraged to use some sort of buffering mechanism.
-pub async fn read_varint<S>(socket: &mut S) -> Result<usize, io::Error>
-where
-    S: AsyncRead + Unpin,
-{
-    unsigned_varint::aio::read_usize(socket)
-        .await
-        .map_err(|e| match e {
-            unsigned_varint::io::ReadError::Io(e) => e,
-            unsigned_varint::io::ReadError::Decode(e) => {
-                io::Error::new(io::ErrorKind::InvalidData, e)
-            }
-            _ => io::Error::new(io::ErrorKind::InvalidData, "invalid varint"),
-        })
-}
-
-/// Writes a message to the given socket with a length prefix appended to it. Also flushes the socket.
-///
-/// # Note
-/// Prepends a variable-length prefix indicate the length of the message.
-/// This is compatible with what [`read_length_prefixed`] expects.
-pub async fn write_length_prefixed<A>(
-    socket: &mut A,
-    data: impl AsRef<[u8]>,
-) -> Result<(), io::Error>
-where
-    A: AsyncWrite + Unpin,
-{
-    write_varint(socket, data.as_ref().len()).await?;
-    socket.write_all(data.as_ref()).await?;
-    socket.flush().await?;
-
-    Ok(())
-}
-
-/// Writes a variable-length integer to the `socket`.
-///
-/// # Note
-/// Does **NOT** flush the socket.
-pub async fn write_varint<A>(socket: &mut A, len: usize) -> Result<(), io::Error>
-where
-    A: AsyncWrite + Unpin,
-{
-    let mut len_data = unsigned_varint::encode::usize_buffer();
-    let encoded_len = unsigned_varint::encode::usize(len, &mut len_data).len();
-    socket.write_all(&len_data[..encoded_len]).await?;
-
-    Ok(())
-}
 
 /// Wire format codec for protocol messages.
 ///
@@ -104,7 +24,10 @@ where
 /// - `0b01`: Broadcast
 /// - `0b10`: Unsubscribe
 /// - `0b11`: Reserved (invalid)
-pub struct Codec;
+#[derive(Default)]
+pub struct Codec {
+    unsigned_varint: UviBytes<Bytes>,
+}
 
 impl Codec {
     /// Wire type tag for Subscribe messages.
@@ -116,6 +39,18 @@ impl Codec {
     /// Mask to extract the message type from the header byte.
     const TAG_MASK: u8 = 0b11;
 
+    /// Create a  new codec.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set maximum size for encoded/decoded values.
+    pub fn with_max_size(self, max_size: usize) -> Self {
+        let mut unsigned_varint = self.unsigned_varint;
+        unsigned_varint.set_max_len(max_size);
+        Self { unsigned_varint }
+    }
+
     /// Decodes a message from a byte slice.
     ///
     /// # Errors
@@ -123,28 +58,38 @@ impl Codec {
     /// - The input is empty
     /// - The topic length in the header exceeds the available bytes
     /// - The message type bits are invalid (`0b11`)
-    pub fn decode(bytes: &[u8]) -> io::Result<Message> {
-        if bytes.is_empty() {
+    pub fn decode_msg(&mut self, buf: &mut BytesMut) -> io::Result<Option<Message>> {
+        let mut buf = match self.unsigned_varint.decode(buf)? {
+            None => return Ok(None),
+            Some(b) => b,
+        };
+
+        if !buf.has_remaining() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "empty message"));
         }
 
-        let topic_len = (bytes[0] >> 2) as usize;
+        let len_tag = buf.get_u8();
+        let topic_len = (len_tag >> 2) as usize;
+        let tag = len_tag & Self::TAG_MASK;
 
-        if bytes.len() < topic_len + 1 {
+        if buf.remaining() < topic_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "topic length out of range",
             ));
         }
 
-        let topic = Topic::new(&bytes[1..topic_len + 1]);
+        let topic = Topic::new(&buf.copy_to_bytes(topic_len));
 
-        match bytes[0] & Self::TAG_MASK {
-            Self::TAG_SUBSCRIBE => Ok(Message::Subscribe(topic)),
-            Self::TAG_UNSUBSCRIBE => Ok(Message::Unsubscribe(topic)),
+        match tag {
+            Self::TAG_SUBSCRIBE => Ok(Some(Message::Subscribe(topic))),
+            Self::TAG_UNSUBSCRIBE => Ok(Some(Message::Unsubscribe(topic))),
             Self::TAG_BROADCAST => {
-                let payload = Bytes::copy_from_slice(&bytes[topic_len + 1..]);
-                Ok(Message::Broadcast(topic, payload))
+                let payload = match self.unsigned_varint.decode(&mut buf)? {
+                    None => return Ok(None),
+                    Some(payload) => payload,
+                };
+                Ok(Some(Message::Broadcast(topic, payload.freeze())))
             }
             _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header")),
         }
@@ -157,227 +102,134 @@ impl Codec {
     ///
     /// # Errors
     /// Returns an error if writing to the writer fails.
-    pub fn encode<W>(message: &Message, writer: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
+    pub fn encode_msg(&mut self, message: Message, dst: &mut BytesMut) -> io::Result<()> {
+        let mut buf = BytesMut::new();
         match message {
             Message::Subscribe(topic) => {
                 let len = (topic.len() as u8) << 2;
-                writer.write_all(&[len | Self::TAG_SUBSCRIBE])?;
-                writer.write_all(topic.as_ref())?;
+                buf.put_u8(len | Self::TAG_SUBSCRIBE);
+                buf.put_slice(topic.as_ref());
             }
             Message::Unsubscribe(topic) => {
                 let len = (topic.len() as u8) << 2;
-                writer.write_all(&[len | Self::TAG_UNSUBSCRIBE])?;
-                writer.write_all(topic.as_ref())?;
+                buf.put_u8(len | Self::TAG_UNSUBSCRIBE);
+                buf.put_slice(topic.as_ref());
             }
             Message::Broadcast(topic, payload) => {
                 let len = (topic.len() as u8) << 2;
-                writer.write_all(&[len | Self::TAG_BROADCAST])?;
-                writer.write_all(topic.as_ref())?;
-                writer.write_all(payload)?;
+                buf.put_u8(len | Self::TAG_BROADCAST);
+                buf.put_slice(topic.as_ref());
+                self.unsigned_varint.encode(payload, &mut buf)?;
             }
         }
-        Ok(())
+        self.unsigned_varint.encode(buf.freeze(), dst)
     }
+}
 
-    /// Returns the encoded size of a message in bytes.
-    ///
-    /// This is useful for pre-allocating buffers or for length-prefixed framing.
-    pub fn encoded_len(message: &Message) -> usize {
-        match message {
-            Message::Subscribe(topic) => 1 + topic.len(),
-            Message::Unsubscribe(topic) => 1 + topic.len(),
-            Message::Broadcast(topic, payload) => 1 + topic.len() + payload.len(),
-        }
+impl Encoder for Codec {
+    type Item<'a> = Message;
+    type Error = io::Error;
+
+    fn encode(&mut self, msg: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        Codec::encode_msg(self, msg, dst)
+    }
+}
+
+impl Decoder for Codec {
+    type Item = Message;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        Codec::decode_msg(self, src)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
-    use futures::io::Cursor;
-
-    // ==================== Round-Trip Tests ====================
 
     #[test]
-    fn test_roundtrip_empty() {
-        block_on(async {
-            let data = b"";
-            let mut buf = Vec::new();
+    fn test_decode_multiple_messages_in_sequence() {
+        let mut codec = Codec::new();
+        let topic = Topic::new(b"test");
 
-            write_length_prefixed(&mut buf, data).await.unwrap();
-            let mut cursor = Cursor::new(buf);
-            let result = read_length_prefixed(&mut cursor, 1024).await.unwrap();
+        let messages = vec![
+            Message::Subscribe(topic),
+            Message::Broadcast(topic, Bytes::from_static(b"hello")),
+            Message::Broadcast(topic, Bytes::from_static(b"world")),
+            Message::Unsubscribe(topic),
+        ];
 
-            assert_eq!(result, data);
-        });
+        // Encode all messages into a single buffer
+        let mut buf = BytesMut::new();
+        for msg in &messages {
+            codec.encode(msg.clone(), &mut buf).unwrap();
+        }
+
+        // Decode them one by one
+        let mut decoded = Vec::new();
+        while let Some(msg) = codec.decode(&mut buf).unwrap() {
+            decoded.push(msg);
+        }
+
+        assert_eq!(decoded, messages);
+        assert!(buf.is_empty(), "buffer should be fully consumed");
     }
 
     #[test]
-    fn test_roundtrip_small() {
-        block_on(async {
-            let data = b"hello world";
-            let mut buf = Vec::new();
+    fn test_decode_partial_message_returns_none() {
+        let mut codec = Codec::new();
+        let topic = Topic::new(b"test");
+        let msg = Message::Broadcast(topic, Bytes::from_static(b"payload"));
 
-            write_length_prefixed(&mut buf, data).await.unwrap();
-            let mut cursor = Cursor::new(buf);
-            let result = read_length_prefixed(&mut cursor, 1024).await.unwrap();
+        let mut full_buf = BytesMut::new();
+        codec.encode_msg(msg.clone(), &mut full_buf).unwrap();
 
-            assert_eq!(result, data);
-        });
+        // Try decoding with only partial data
+        let mut partial = full_buf.split_to(full_buf.len() / 2);
+        assert!(codec.decode(&mut partial).unwrap().is_none());
+
+        // Add the rest and decode should succeed
+        partial.extend_from_slice(&full_buf);
+        let decoded = codec.decode(&mut partial).unwrap();
+        assert_eq!(decoded, Some(msg));
     }
 
     #[test]
-    fn test_roundtrip_large() {
-        block_on(async {
-            let data = vec![0xABu8; 10000];
-            let mut buf = Vec::new();
+    fn test_broadcast_empty_payload() {
+        let mut codec = Codec::new();
+        let topic = Topic::new(b"test");
+        let msg = Message::Broadcast(topic, Bytes::new());
 
-            write_length_prefixed(&mut buf, &data).await.unwrap();
-            let mut cursor = Cursor::new(buf);
-            let result = read_length_prefixed(&mut cursor, 100000).await.unwrap();
+        let mut buf = BytesMut::new();
+        codec.encode(msg.clone(), &mut buf).unwrap();
 
-            assert_eq!(result, data);
-        });
+        let decoded = codec.decode(&mut buf).unwrap();
+        assert_eq!(decoded, Some(msg));
     }
 
     #[test]
-    fn test_roundtrip_at_max_size() {
-        block_on(async {
-            let data = vec![0xCDu8; 1000];
-            let mut buf = Vec::new();
+    fn test_max_length_topic_roundtrip() {
+        let mut codec = Codec::new();
+        let topic_bytes = [b'x'; Topic::MAX_LENGTH];
+        let topic = Topic::new(&topic_bytes);
 
-            write_length_prefixed(&mut buf, &data).await.unwrap();
-            let mut cursor = Cursor::new(buf);
-            // max_size exactly equals data size
-            let result = read_length_prefixed(&mut cursor, 1000).await.unwrap();
+        let messages = vec![
+            Message::Subscribe(topic),
+            Message::Broadcast(topic, Bytes::from_static(b"data")),
+            Message::Unsubscribe(topic),
+        ];
 
-            assert_eq!(result, data);
-        });
-    }
+        let mut buf = BytesMut::new();
+        for msg in &messages {
+            codec.encode(msg.clone(), &mut buf).unwrap();
+        }
 
-    // ==================== Varint Encoding Tests ====================
+        let mut decoded = Vec::new();
+        while let Some(msg) = codec.decode(&mut buf).unwrap() {
+            decoded.push(msg);
+        }
 
-    #[test]
-    fn test_varint_small_value() {
-        block_on(async {
-            let mut buf = Vec::new();
-            write_varint(&mut buf, 42).await.unwrap();
-
-            // Small values (< 128) should use only 1 byte
-            assert_eq!(buf.len(), 1);
-            assert_eq!(buf[0], 42);
-        });
-    }
-
-    #[test]
-    fn test_varint_boundary_127() {
-        block_on(async {
-            let mut buf = Vec::new();
-            write_varint(&mut buf, 127).await.unwrap();
-
-            // 127 is the max single-byte value
-            assert_eq!(buf.len(), 1);
-            assert_eq!(buf[0], 127);
-        });
-    }
-
-    #[test]
-    fn test_varint_boundary_128() {
-        block_on(async {
-            let mut buf = Vec::new();
-            write_varint(&mut buf, 128).await.unwrap();
-
-            // 128 requires 2 bytes
-            assert_eq!(buf.len(), 2);
-        });
-    }
-
-    #[test]
-    fn test_varint_large_value() {
-        block_on(async {
-            let mut buf = Vec::new();
-            write_varint(&mut buf, 16384).await.unwrap();
-
-            // Larger values need more bytes
-            assert!(buf.len() >= 2);
-
-            // Read it back
-            let mut cursor = Cursor::new(buf);
-            let result = read_varint(&mut cursor).await.unwrap();
-            assert_eq!(result, 16384);
-        });
-    }
-
-    // ==================== Error Condition Tests ====================
-
-    #[test]
-    fn test_read_exceeds_max_size() {
-        block_on(async {
-            let data = vec![0u8; 100];
-            let mut buf = Vec::new();
-
-            write_length_prefixed(&mut buf, &data).await.unwrap();
-            let mut cursor = Cursor::new(buf);
-
-            // Try to read with max_size smaller than data
-            let result = read_length_prefixed(&mut cursor, 50).await;
-
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        });
-    }
-
-    #[test]
-    fn test_read_empty_stream_returns_eof() {
-        block_on(async {
-            let mut cursor = Cursor::new(Vec::<u8>::new());
-            let result = read_length_prefixed(&mut cursor, 1024).await;
-
-            assert!(result.is_err());
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-        });
-    }
-
-    #[test]
-    fn test_read_truncated_varint() {
-        block_on(async {
-            // A varint that indicates more bytes should follow but doesn't
-            let buf = vec![0x80]; // High bit set, needs continuation
-            let mut cursor = Cursor::new(buf);
-
-            let result = read_varint(&mut cursor).await;
-            assert!(result.is_err());
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-        });
-    }
-
-    // ==================== Multiple Messages Tests ====================
-
-    #[test]
-    fn test_multiple_messages_in_sequence() {
-        block_on(async {
-            let msg1 = b"first";
-            let msg2 = b"second message";
-            let msg3 = b"third";
-
-            let mut buf = Vec::new();
-            write_length_prefixed(&mut buf, msg1).await.unwrap();
-            write_length_prefixed(&mut buf, msg2).await.unwrap();
-            write_length_prefixed(&mut buf, msg3).await.unwrap();
-
-            let mut cursor = Cursor::new(buf);
-            let r1 = read_length_prefixed(&mut cursor, 1024).await.unwrap();
-            let r2 = read_length_prefixed(&mut cursor, 1024).await.unwrap();
-            let r3 = read_length_prefixed(&mut cursor, 1024).await.unwrap();
-
-            assert_eq!(r1, msg1);
-            assert_eq!(r2, msg2);
-            assert_eq!(r3, msg3);
-        });
+        assert_eq!(decoded, messages);
     }
 }

@@ -5,10 +5,11 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::FutureExt;
-use futures::future::BoxFuture;
+use asynchronous_codec::{FramedRead, FramedWrite};
+use futures::{Sink, Stream};
 use libp2p::core::upgrade::ReadyUpgrade;
 use libp2p::swarm::handler::{
     ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
@@ -17,9 +18,9 @@ use libp2p::swarm::handler::{
 use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, StreamProtocol, SubstreamProtocol};
 use tracing::{debug, trace, warn};
 
-use crate::Config;
-use crate::codec::{Codec, read_length_prefixed, write_length_prefixed};
+use crate::codec::Codec;
 use crate::protocol::Message;
+use crate::Config;
 
 /// Protocol identifier for scatter.
 const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter/1.0.0");
@@ -54,24 +55,28 @@ pub struct Handler {
     outbound_substream_requested: bool,
 }
 
-type SubstreamFuture<T> = BoxFuture<'static, (Substream, io::Result<T>)>;
+/// A framed read half of a substream.
+type FramedSubstreamRead =
+    FramedRead<futures::io::ReadHalf<libp2p::Stream>, Codec>;
+
+/// A framed write half of a substream.
+type FramedSubstreamWrite =
+    FramedWrite<futures::io::WriteHalf<libp2p::Stream>, Codec>;
 
 /// State of the inbound substream.
 enum InboundState {
     /// No inbound substream yet.
     None,
-    /// Waiting for the next message.
-    Reading(SubstreamFuture<Message>),
+    /// Active framed reader for receiving messages.
+    Active(FramedSubstreamRead),
 }
 
 /// State of the outbound substream.
 enum OutboundState {
     /// No outbound substream yet.
     None,
-    /// We have a substream ready to send messages.
-    Ready(Substream),
-    /// Currently sending a message.
-    Sending(SubstreamFuture<()>),
+    /// Active framed writer ready to send messages.
+    Ready(FramedSubstreamWrite),
     /// The substream has been closed or errored.
     Closed,
 }
@@ -82,9 +87,6 @@ impl OutboundState {
         std::mem::replace(self, OutboundState::None)
     }
 }
-
-/// A negotiated substream.
-type Substream = libp2p::Stream;
 
 impl Handler {
     /// Create a new handler with the given configuration.
@@ -98,27 +100,6 @@ impl Handler {
             pending_events: VecDeque::new(),
             outbound_substream_requested: false,
         }
-    }
-
-    /// Start reading from an inbound substream.
-    fn start_inbound_read(&mut self, mut stream: Substream) {
-        trace!("Starting inbound read on substream");
-
-        let max_size = self.config.max_message_size;
-        self.inbound = InboundState::Reading(Box::pin(async move {
-            let result = read_message(&mut stream, max_size).await;
-            (stream, result)
-        }));
-    }
-
-    /// Start sending a message on the outbound substream.
-    fn start_outbound_send(&mut self, mut stream: Substream, message: Message) {
-        trace!(?message, "Starting outbound send on substream");
-
-        self.outbound = OutboundState::Sending(Box::pin(async move {
-            let result = send_message(&mut stream, &message).await;
-            (stream, result)
-        }));
     }
 }
 
@@ -170,9 +151,11 @@ impl ConnectionHandler for Handler {
                 protocol: stream,
                 ..
             }) => {
-                // We got an inbound substream, start reading from it
-                trace!("Inbound substream negotiated, starting read");
-                self.start_inbound_read(stream);
+                // We got an inbound substream, create a framed reader for it
+                trace!("Inbound substream negotiated, creating framed reader");
+                let (read_half, _write_half) = futures::AsyncReadExt::split(stream);
+                let codec = Codec::new().with_max_size(self.config.max_message_size);
+                self.inbound = InboundState::Active(FramedRead::new(read_half, codec));
             }
 
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
@@ -183,17 +166,11 @@ impl ConnectionHandler for Handler {
                 self.outbound_substream_attempts = 0;
                 self.outbound_substream_requested = false;
 
-                // If we have pending messages, start sending immediately
-                if let Some(message) = self.pending_messages.pop_front() {
-                    trace!(
-                        ?message,
-                        "Outbound substream negotiated, sending queued message"
-                    );
-                    self.start_outbound_send(stream, message);
-                } else {
-                    trace!("Outbound substream negotiated, no pending messages");
-                    self.outbound = OutboundState::Ready(stream);
-                }
+                // Create a framed writer for the outbound substream
+                trace!("Outbound substream negotiated, creating framed writer");
+                let (_read_half, write_half) = futures::AsyncReadExt::split(stream);
+                let codec = Codec::new().with_max_size(self.config.max_message_size);
+                self.outbound = OutboundState::Ready(FramedWrite::new(write_half, codec));
             }
 
             ConnectionEvent::DialUpgradeError(DialUpgradeError { error, .. }) => {
@@ -244,7 +221,7 @@ impl ConnectionHandler for Handler {
         trace!(
             pending_messages = self.pending_messages.len(),
             pending_events = self.pending_events.len(),
-            inbound_state = ?matches!(&self.inbound, InboundState::Reading(_)),
+            inbound_state = ?matches!(&self.inbound, InboundState::Active(_)),
             outbound_state = ?std::mem::discriminant(&self.outbound),
             "Handler::poll called"
         );
@@ -254,86 +231,98 @@ impl ConnectionHandler for Handler {
             return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
         }
 
-        // Poll the inbound substream
-        match &mut self.inbound {
-            InboundState::Reading(future) => {
-                trace!("Polling inbound substream for messages");
-
-                if let Poll::Ready((stream, result)) = future.poll_unpin(cx) {
-                    match result {
-                        Ok(message) => {
-                            // Successfully read a message, continue reading
-                            trace!(?message, "Received message on inbound substream");
-
-                            self.pending_events
-                                .push_back(HandlerEvent::Received(message));
-
-                            self.start_inbound_read(stream);
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                            // Stream was closed gracefully by remote
-                            debug!("Inbound substream closed by remote");
-
-                            self.inbound = InboundState::None;
-                        }
-                        Err(e) => {
-                            // Error reading from stream
-                            debug!("Error reading from inbound substream: {e}");
-
-                            self.pending_events.push_back(HandlerEvent::Error(e));
-                            self.inbound = InboundState::None;
-                        }
+        // Poll the inbound substream for messages
+        if let InboundState::Active(ref mut framed) = self.inbound {
+            loop {
+                match Pin::new(&mut *framed).poll_next(cx) {
+                    Poll::Ready(Some(Ok(message))) => {
+                        trace!(?message, "Received message on inbound substream");
+                        return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                            HandlerEvent::Received(message),
+                        ));
                     }
-
-                    // Return pending event if we added one
-                    if let Some(event) = self.pending_events.pop_front() {
-                        return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
+                    Poll::Ready(Some(Err(e))) => {
+                        debug!("Error reading from inbound substream: {e}");
+                        self.inbound = InboundState::None;
+                        return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                            HandlerEvent::Error(e),
+                        ));
                     }
+                    Poll::Ready(None) => {
+                        // Stream was closed gracefully by remote
+                        debug!("Inbound substream closed by remote");
+                        self.inbound = InboundState::None;
+                        break;
+                    }
+                    Poll::Pending => break,
                 }
             }
-            InboundState::None => {}
         }
 
-        // Poll the outbound substream in a loop to handle state transitions
+        // Poll the outbound substream for sending messages
         loop {
             match self.outbound.take() {
-                OutboundState::Sending(mut future) => {
-                    match future.poll_unpin(cx) {
-                        Poll::Ready((stream, Ok(()))) => {
-                            // Successfully sent, check for more messages
-                            trace!("Message sent successfully on outbound substream");
+                OutboundState::Ready(mut sink) => {
+                    // If we have pending messages, try to send them
+                    if let Some(message) = self.pending_messages.pop_front() {
+                        trace!(?message, "Sending message on outbound substream");
 
-                            if let Some(message) = self.pending_messages.pop_front() {
-                                trace!(?message, "Sending next queued message");
-                                self.start_outbound_send(stream, message);
-                                // Continue loop to poll the new Sending future
-                            } else {
-                                self.outbound = OutboundState::Ready(stream);
+                        // First, poll ready to ensure we can send
+                        match Pin::new(&mut sink).poll_ready(cx) {
+                            Poll::Ready(Ok(())) => {
+                                // Start sending the message
+                                match Pin::new(&mut sink).start_send(message) {
+                                    Ok(()) => {
+                                        // Flush the message
+                                        match Pin::new(&mut sink).poll_flush(cx) {
+                                            Poll::Ready(Ok(())) => {
+                                                trace!(
+                                                    "Message sent successfully on outbound substream"
+                                                );
+                                                // Put sink back and continue to send more
+                                                self.outbound = OutboundState::Ready(sink);
+                                                // Continue loop to try sending more messages
+                                            }
+                                            Poll::Ready(Err(e)) => {
+                                                debug!(
+                                                    "Error flushing on outbound substream: {}",
+                                                    e
+                                                );
+                                                self.outbound = OutboundState::None;
+                                                // Don't clear pending messages, we'll retry with a new substream
+                                                break;
+                                            }
+                                            Poll::Pending => {
+                                                // Still flushing, put sink back
+                                                self.outbound = OutboundState::Ready(sink);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Error sending on outbound substream: {}", e);
+                                        self.outbound = OutboundState::None;
+                                        break;
+                                    }
+                                }
+                            }
+                            Poll::Ready(Err(e)) => {
+                                // Error, need to reopen substream
+                                debug!("Error on outbound substream: {}", e);
+                                // Put message back
+                                self.pending_messages.push_front(message);
+                                self.outbound = OutboundState::None;
+                                break;
+                            }
+                            Poll::Pending => {
+                                // Not ready yet, put message back
+                                self.pending_messages.push_front(message);
+                                self.outbound = OutboundState::Ready(sink);
                                 break;
                             }
                         }
-                        Poll::Ready((_, Err(e))) => {
-                            // Error sending, need to reopen substream
-                            debug!("Error sending on outbound substream: {}", e);
-                            self.outbound = OutboundState::None;
-                            // Don't clear pending messages, we'll retry with a new substream
-                            // Continue loop to potentially request new substream
-                        }
-                        Poll::Pending => {
-                            self.outbound = OutboundState::Sending(future);
-                            break;
-                        }
-                    }
-                }
-
-                OutboundState::Ready(stream) => {
-                    // If we have pending messages, start sending
-                    if let Some(message) = self.pending_messages.pop_front() {
-                        trace!(?message, "Outbound ready, sending queued message");
-                        self.start_outbound_send(stream, message);
-                        // Continue loop to poll the new Sending future
                     } else {
-                        self.outbound = OutboundState::Ready(stream);
+                        self.outbound = OutboundState::Ready(sink);
                         break;
                     }
                 }
@@ -376,32 +365,11 @@ impl ConnectionHandler for Handler {
     }
 }
 
-/// Read a single message from the stream.
-async fn read_message(stream: &mut Substream, max_size: usize) -> io::Result<Message> {
-    let packet = read_length_prefixed(stream, max_size).await?;
-    if packet.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "empty packet (stream closed)",
-        ));
-    }
-    Codec::decode(&packet)
-}
-
-/// Send a single message on the stream.
-async fn send_message(stream: &mut Substream, message: &Message) -> io::Result<()> {
-    let mut buf = Vec::with_capacity(Codec::encoded_len(message));
-    Codec::encode(message, &mut buf)?;
-    write_length_prefixed(stream, buf).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::Topic;
     use bytes::Bytes;
-    use futures::executor::block_on;
-    use futures::io::Cursor;
     use std::task::Poll;
 
     // ==================== Handler Creation Tests ====================
@@ -649,106 +617,6 @@ mod tests {
         assert_eq!(handler.outbound_substream_attempts, 1);
     }
 
-    // ==================== read_message / send_message Tests ====================
-
-    /// Helper to encode a message to a Vec for testing.
-    fn encode_to_vec(msg: &Message) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(Codec::encoded_len(msg));
-        Codec::encode(msg, &mut buf).unwrap();
-        buf
-    }
-
-    #[test]
-    fn test_send_message_and_read_message_roundtrip() {
-        block_on(async {
-            let topic = Topic::new(b"test-topic");
-            let original = Message::Broadcast(topic, Bytes::from_static(b"hello world"));
-
-            // Write message to buffer
-            let mut buf = Vec::new();
-            let bytes = encode_to_vec(&original);
-            crate::codec::write_length_prefixed(&mut buf, bytes)
-                .await
-                .unwrap();
-
-            // Read it back
-            let mut cursor = Cursor::new(buf);
-            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
-                .await
-                .unwrap();
-            let received = Codec::decode(&packet).unwrap();
-
-            assert_eq!(original, received);
-        });
-    }
-
-    #[test]
-    fn test_read_message_empty_packet_is_eof() {
-        block_on(async {
-            // Write a zero-length message (varint 0)
-            let mut buf = Vec::new();
-            crate::codec::write_length_prefixed(&mut buf, b"")
-                .await
-                .unwrap();
-
-            let mut cursor = Cursor::new(buf);
-            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
-                .await
-                .unwrap();
-
-            // Empty packet should be treated as EOF by read_message
-            assert!(packet.is_empty());
-            // Codec::decode on empty returns error
-            let result = Codec::decode(&packet);
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn test_send_message_subscribe() {
-        block_on(async {
-            let topic = Topic::new(b"my-topic");
-            let msg = Message::Subscribe(topic);
-
-            let mut buf = Vec::new();
-            let bytes = encode_to_vec(&msg);
-            crate::codec::write_length_prefixed(&mut buf, bytes)
-                .await
-                .unwrap();
-
-            // Verify we can read it back
-            let mut cursor = Cursor::new(buf);
-            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
-                .await
-                .unwrap();
-            let received = Codec::decode(&packet).unwrap();
-
-            assert_eq!(msg, received);
-        });
-    }
-
-    #[test]
-    fn test_send_message_unsubscribe() {
-        block_on(async {
-            let topic = Topic::new(b"my-topic");
-            let msg = Message::Unsubscribe(topic);
-
-            let mut buf = Vec::new();
-            let bytes = encode_to_vec(&msg);
-            crate::codec::write_length_prefixed(&mut buf, bytes)
-                .await
-                .unwrap();
-
-            let mut cursor = Cursor::new(buf);
-            let packet = crate::codec::read_length_prefixed(&mut cursor, 1024)
-                .await
-                .unwrap();
-            let received = Codec::decode(&packet).unwrap();
-
-            assert_eq!(msg, received);
-        });
-    }
-
     // ==================== Queue Overflow Behavior Tests ====================
 
     #[test]
@@ -760,10 +628,8 @@ mod tests {
 
         // Fill the queue
         for i in 0..10 {
-            handler.on_behaviour_event(Message::Broadcast(
-                topic,
-                Bytes::from(format!("msg-{}", i)),
-            ));
+            handler
+                .on_behaviour_event(Message::Broadcast(topic, Bytes::from(format!("msg-{}", i))));
         }
         assert_eq!(handler.pending_messages.len(), 10);
 
@@ -830,8 +696,14 @@ mod tests {
 
         // Verify original order preserved
         assert!(matches!(handler.pending_messages[0], Message::Subscribe(_)));
-        assert!(matches!(handler.pending_messages[1], Message::Broadcast(_, _)));
-        assert!(matches!(handler.pending_messages[2], Message::Unsubscribe(_)));
+        assert!(matches!(
+            handler.pending_messages[1],
+            Message::Broadcast(_, _)
+        ));
+        assert!(matches!(
+            handler.pending_messages[2],
+            Message::Unsubscribe(_)
+        ));
     }
 
     // ==================== Substream Recovery Tests ====================
@@ -1002,8 +874,10 @@ mod tests {
 
     #[test]
     fn test_keep_alive_false_when_closed() {
-        let mut handler = Handler::default();
-        handler.outbound = OutboundState::Closed;
+        let mut handler = Handler {
+            outbound: OutboundState::Closed,
+            ..Handler::default()
+        };
 
         // Even with Closed state, if there are pending messages, keep alive
         // (though they won't be sent)

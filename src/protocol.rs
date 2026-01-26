@@ -2,7 +2,6 @@ use core::fmt;
 
 use bytes::Bytes;
 
-use crate::codec::Codec;
 use crate::util::BytesRef;
 
 /// A topic identifier for the broadcast protocol.
@@ -115,25 +114,11 @@ impl Message {
             Self::Unsubscribe(topic) => topic,
         }
     }
-
-    /// Returns the encoded size of this message in bytes.
-    pub fn len(&self) -> usize {
-        Codec::encoded_len(self)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::ErrorKind;
-
     use super::*;
-
-    /// Helper to encode a message to a Vec for testing.
-    fn encode_to_vec(msg: &Message) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(Codec::encoded_len(msg));
-        Codec::encode(msg, &mut buf).unwrap();
-        buf
-    }
 
     // ==================== Topic Tests ====================
 
@@ -183,151 +168,5 @@ mod tests {
         let t1 = Topic::new(b"aaa");
         let t2 = Topic::new(b"bbb");
         assert!(t1 < t2);
-    }
-
-    // ==================== Codec Roundtrip Tests ====================
-
-    #[test]
-    fn test_roundtrip() {
-        let topic = Topic::new(b"topic");
-        let msgs = [
-            Message::Broadcast(Topic::new(b""), Bytes::from_static(b"")),
-            Message::Subscribe(topic),
-            Message::Unsubscribe(topic),
-            Message::Broadcast(topic, Bytes::from_static(b"content")),
-        ];
-        for msg in &msgs {
-            let msg2 = Codec::decode(&encode_to_vec(msg)).unwrap();
-            assert_eq!(msg, &msg2);
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_empty_topic() {
-        let topic = Topic::new(b"");
-        let msgs = [
-            Message::Subscribe(topic),
-            Message::Unsubscribe(topic),
-            Message::Broadcast(topic, Bytes::from_static(b"payload")),
-        ];
-        for msg in &msgs {
-            let msg2 = Codec::decode(&encode_to_vec(msg)).unwrap();
-            assert_eq!(msg, &msg2);
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_max_topic() {
-        let data = [b'T'; Topic::MAX_LENGTH];
-        let topic = Topic::new(&data);
-        let msgs = [
-            Message::Subscribe(topic),
-            Message::Unsubscribe(topic),
-            Message::Broadcast(topic, Bytes::from_static(b"data")),
-        ];
-        for msg in &msgs {
-            let msg2 = Codec::decode(&encode_to_vec(msg)).unwrap();
-            assert_eq!(msg, &msg2);
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_empty_payload() {
-        let topic = Topic::new(b"topic");
-        let msg = Message::Broadcast(topic, Bytes::new());
-        let msg2 = Codec::decode(&encode_to_vec(&msg)).unwrap();
-        assert_eq!(msg, msg2);
-    }
-
-    #[test]
-    fn test_roundtrip_large_payload() {
-        let topic = Topic::new(b"topic");
-        let payload = Bytes::from(vec![0xAB; 10000]);
-        let msg = Message::Broadcast(topic, payload);
-        let msg2 = Codec::decode(&encode_to_vec(&msg)).unwrap();
-        assert_eq!(msg, msg2);
-    }
-
-    // ==================== Message Length Tests ====================
-
-    #[test]
-    fn test_message_len() {
-        let topic = Topic::new(b"hello"); // 5 bytes
-        assert_eq!(Message::Subscribe(topic).len(), 6); // 1 header + 5 topic
-        assert_eq!(Message::Unsubscribe(topic).len(), 6);
-        assert_eq!(
-            Message::Broadcast(topic, Bytes::from_static(b"world")).len(),
-            11
-        ); // 1 + 5 + 5
-    }
-
-    // ==================== Codec Error Condition Tests ====================
-
-    #[test]
-    fn test_empty_message_error() {
-        let result = Codec::decode(&[]);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn test_truncated_topic_error() {
-        // Header says topic is 5 bytes but only 2 bytes follow
-        let bytes = [0b0001_0100, b'a', b'b']; // topic_len = 5, actual = 2
-        let result = Codec::decode(&bytes);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn test_invalid_message_type_error() {
-        // Type bits 0b11 are invalid
-        let bytes = [0b0000_0011]; // topic_len = 0, type = 0b11
-        let result = Codec::decode(&bytes);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_invalid_message() {
-        let out_of_range = [0b0000_0100];
-        Codec::decode(&out_of_range).unwrap();
-    }
-
-    // ==================== Wire Format Tests ====================
-
-    #[test]
-    fn test_subscribe_wire_format() {
-        let topic = Topic::new(b"test");
-        let msg = Message::Subscribe(topic);
-        let bytes = encode_to_vec(&msg);
-
-        // Header: topic_len (4) << 2 | type (0b00) = 0b0001_0000 = 16
-        assert_eq!(bytes[0], 16);
-        assert_eq!(&bytes[1..], b"test");
-    }
-
-    #[test]
-    fn test_unsubscribe_wire_format() {
-        let topic = Topic::new(b"test");
-        let msg = Message::Unsubscribe(topic);
-        let bytes = encode_to_vec(&msg);
-
-        // Header: topic_len (4) << 2 | type (0b10) = 0b0001_0010 = 18
-        assert_eq!(bytes[0], 18);
-        assert_eq!(&bytes[1..], b"test");
-    }
-
-    #[test]
-    fn test_broadcast_wire_format() {
-        let topic = Topic::new(b"test");
-        let msg = Message::Broadcast(topic, Bytes::from_static(b"data"));
-        let bytes = encode_to_vec(&msg);
-
-        // Header: topic_len (4) << 2 | type (0b01) = 0b0001_0001 = 17
-        assert_eq!(bytes[0], 17);
-        assert_eq!(&bytes[1..5], b"test");
-        assert_eq!(&bytes[5..], b"data");
     }
 }
