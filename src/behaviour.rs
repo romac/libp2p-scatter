@@ -32,7 +32,10 @@ pub enum Event {
 #[derive(Default)]
 pub struct Behaviour {
     config: Config,
+    /// Map from peer to the set of topics they are subscribed to.
     connected_peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
+    /// Reverse index: map from topic to the set of peers subscribed to it.
+    topic_subscribers: FnvHashMap<Topic, FnvHashSet<PeerId>>,
     subscribed_topics: FnvHashSet<Topic>,
     events: VecDeque<ToSwarm<Event, Message>>,
 
@@ -77,15 +80,10 @@ impl Behaviour {
 
     /// Returns an iterator over the peers subscribed to the given topic.
     pub fn peers(&self, topic: Topic) -> impl Iterator<Item = PeerId> + '_ {
-        self.connected_peers
-            .iter()
-            .filter_map(move |(peer_id, topics)| {
-                if topics.contains(&topic) {
-                    Some(*peer_id)
-                } else {
-                    None
-                }
-            })
+        self.topic_subscribers
+            .get(&topic)
+            .into_iter()
+            .flat_map(|peers| peers.iter().copied())
     }
 
     /// Returns an iterator over the topics the given peer is subscribed to.
@@ -182,6 +180,11 @@ impl Behaviour {
     fn inject_disconnected(&mut self, peer: &PeerId) {
         if let Some(topics) = self.connected_peers.remove(peer) {
             for topic in topics {
+                // Remove from reverse index
+                if let Some(peers) = self.topic_subscribers.get_mut(&topic) {
+                    peers.remove(peer);
+                }
+
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(*peer, topic)));
 
@@ -254,6 +257,7 @@ impl NetworkBehaviour for Behaviour {
                 }
 
                 self.connected_peers.entry(peer).or_default().insert(topic);
+                self.topic_subscribers.entry(topic).or_default().insert(peer);
 
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Subscribed(peer, topic)));
@@ -271,6 +275,9 @@ impl NetworkBehaviour for Behaviour {
 
             HandlerEvent::Received(Unsubscribe(topic)) => {
                 self.connected_peers.entry(peer).or_default().remove(&topic);
+                if let Some(peers) = self.topic_subscribers.get_mut(&topic) {
+                    peers.remove(&peer);
+                }
 
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
