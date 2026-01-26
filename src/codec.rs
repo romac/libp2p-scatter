@@ -73,6 +73,17 @@ impl Codec {
         let tag = buf.get_u8();
         let topic_len = buf.get_u8() as usize;
 
+        if topic_len > Topic::MAX_LENGTH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "topic length {} exceeds maximum {}",
+                    topic_len,
+                    Topic::MAX_LENGTH
+                ),
+            ));
+        }
+
         if buf.remaining() < topic_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -266,6 +277,25 @@ mod tests {
 
         let result = codec.decode(&mut buf);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_oversized_topic_length() {
+        let mut codec = Codec::new();
+
+        // Message with topic_len=100 (exceeds MAX_LENGTH of 64)
+        let msg_bytes = &[0x00, 100, b'a', b'b']; // Subscribe, topic_len=100
+        let mut buf = BytesMut::new();
+        let mut len_buf = unsigned_varint::encode::usize_buffer();
+        let len_slice = unsigned_varint::encode::usize(msg_bytes.len(), &mut len_buf);
+        buf.extend_from_slice(len_slice);
+        buf.extend_from_slice(msg_bytes);
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum"));
     }
 
     #[test]
