@@ -82,10 +82,9 @@ impl Codec {
             Self::TAG_SUBSCRIBE => Ok(Some(Message::Subscribe(topic))),
             Self::TAG_UNSUBSCRIBE => Ok(Some(Message::Unsubscribe(topic))),
             Self::TAG_BROADCAST => {
-                let payload = match self.unsigned_varint.decode(&mut buf)? {
-                    None => return Ok(None),
-                    Some(payload) => payload,
-                };
+                let payload = self.unsigned_varint.decode(&mut buf)?.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "incomplete broadcast payload")
+                })?;
                 Ok(Some(Message::Broadcast(topic, payload.freeze())))
             }
             _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid tag")),
