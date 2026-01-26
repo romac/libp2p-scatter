@@ -15,15 +15,15 @@ use crate::protocol::{Message, Topic};
 /// # Wire Format
 ///
 /// Each message is encoded as:
-/// - 1 byte header: `[topic_len (6 bits) | message_type (2 bits)]`
+/// - 1 byte: message type tag
+/// - 1 byte: topic length
 /// - `topic_len` bytes: the topic
-/// - For `Broadcast` messages: the payload bytes
+/// - For `Broadcast` messages: the payload bytes (varint length-prefixed)
 ///
-/// Message type bits:
-/// - `0b00`: Subscribe
-/// - `0b01`: Broadcast
-/// - `0b10`: Unsubscribe
-/// - `0b11`: Reserved (invalid)
+/// Message type tags:
+/// - `0x00`: Subscribe
+/// - `0x01`: Broadcast
+/// - `0x02`: Unsubscribe
 #[derive(Default)]
 pub struct Codec {
     unsigned_varint: UviBytes<Bytes>,
@@ -31,13 +31,11 @@ pub struct Codec {
 
 impl Codec {
     /// Wire type tag for Subscribe messages.
-    const TAG_SUBSCRIBE: u8 = 0b00;
+    const TAG_SUBSCRIBE: u8 = 0x00;
     /// Wire type tag for Broadcast messages.
-    const TAG_BROADCAST: u8 = 0b01;
+    const TAG_BROADCAST: u8 = 0x01;
     /// Wire type tag for Unsubscribe messages.
-    const TAG_UNSUBSCRIBE: u8 = 0b10;
-    /// Mask to extract the message type from the header byte.
-    const TAG_MASK: u8 = 0b11;
+    const TAG_UNSUBSCRIBE: u8 = 0x02;
 
     /// Create a  new codec.
     pub fn new() -> Self {
@@ -55,22 +53,21 @@ impl Codec {
     ///
     /// # Errors
     /// Returns an error if:
-    /// - The input is empty
-    /// - The topic length in the header exceeds the available bytes
-    /// - The message type bits are invalid (`0b11`)
+    /// - The input is too short (missing tag or topic length)
+    /// - The topic length exceeds the available bytes
+    /// - The message type tag is invalid
     pub fn decode_msg(&mut self, buf: &mut BytesMut) -> io::Result<Option<Message>> {
         let mut buf = match self.unsigned_varint.decode(buf)? {
             None => return Ok(None),
             Some(b) => b,
         };
 
-        if !buf.has_remaining() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "empty message"));
+        if buf.remaining() < 2 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "message too short"));
         }
 
-        let len_tag = buf.get_u8();
-        let topic_len = (len_tag >> 2) as usize;
-        let tag = len_tag & Self::TAG_MASK;
+        let tag = buf.get_u8();
+        let topic_len = buf.get_u8() as usize;
 
         if buf.remaining() < topic_len {
             return Err(io::Error::new(
@@ -91,7 +88,7 @@ impl Codec {
                 };
                 Ok(Some(Message::Broadcast(topic, payload.freeze())))
             }
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header")),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid tag")),
         }
     }
 
@@ -106,18 +103,18 @@ impl Codec {
         let mut buf = BytesMut::new();
         match message {
             Message::Subscribe(topic) => {
-                let len = (topic.len() as u8) << 2;
-                buf.put_u8(len | Self::TAG_SUBSCRIBE);
+                buf.put_u8(Self::TAG_SUBSCRIBE);
+                buf.put_u8(topic.len() as u8);
                 buf.put_slice(topic.as_ref());
             }
             Message::Unsubscribe(topic) => {
-                let len = (topic.len() as u8) << 2;
-                buf.put_u8(len | Self::TAG_UNSUBSCRIBE);
+                buf.put_u8(Self::TAG_UNSUBSCRIBE);
+                buf.put_u8(topic.len() as u8);
                 buf.put_slice(topic.as_ref());
             }
             Message::Broadcast(topic, payload) => {
-                let len = (topic.len() as u8) << 2;
-                buf.put_u8(len | Self::TAG_BROADCAST);
+                buf.put_u8(Self::TAG_BROADCAST);
+                buf.put_u8(topic.len() as u8);
                 buf.put_slice(topic.as_ref());
                 self.unsigned_varint.encode(payload, &mut buf)?;
             }

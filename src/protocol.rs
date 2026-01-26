@@ -31,9 +31,9 @@ pub struct Topic {
 impl Topic {
     /// Maximum length of a topic in bytes.
     ///
-    /// This limit is determined by the wire format, which uses 6 bits to encode
-    /// the topic length in the message header.
-    pub const MAX_LENGTH: usize = 63;
+    /// This limit is determined by the wire format, which uses a single byte
+    /// to encode the topic length.
+    pub const MAX_LENGTH: usize = 64;
 
     /// Creates a new topic from a byte slice.
     ///
