@@ -405,7 +405,17 @@ impl ConnectionHandler for Handler {
                     HandlerEvent::Error(e),
                 ));
             }
-            InboundPollResult::Closed | InboundPollResult::Pending => {}
+            InboundPollResult::Closed => {
+                // Inbound substream was closed by remote. Treat this as an error
+                // to trigger connection cleanup and avoid stale subscription state.
+                return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                    HandlerEvent::Error(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "inbound substream closed by remote",
+                    )),
+                ));
+            }
+            InboundPollResult::Pending => {}
         }
 
         // Poll the outbound substream for sending messages
