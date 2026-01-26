@@ -106,13 +106,10 @@ impl Codec {
         }
     }
 
-    /// Encodes a message to a writer without intermediate allocation.
-    ///
-    /// This method writes the message directly to the provided writer,
-    /// avoiding the need to allocate a temporary buffer.
+    /// Encodes a message to the destination buffer.
     ///
     /// # Errors
-    /// Returns an error if writing to the writer fails.
+    /// Returns an error if encoding fails.
     pub fn encode_msg(&mut self, message: Message, dst: &mut BytesMut) -> io::Result<()> {
         let mut buf = BytesMut::new();
         match message {
