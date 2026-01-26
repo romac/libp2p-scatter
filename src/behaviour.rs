@@ -150,6 +150,11 @@ impl Behaviour {
                 continue;
             }
 
+            #[cfg(feature = "metrics")]
+            if let Some(metrics) = &mut self.metrics {
+                metrics.msg_sent(&topic, payload.len());
+            }
+
             self.events.push_back(ToSwarm::NotifyHandler {
                 peer_id: *peer_id,
                 handler: NotifyHandler::Any,
@@ -159,7 +164,6 @@ impl Behaviour {
 
         #[cfg(feature = "metrics")]
         if let Some(metrics) = &mut self.metrics {
-            metrics.msg_sent(&topic, payload.len());
             metrics.register_published_message(&topic);
         }
     }
