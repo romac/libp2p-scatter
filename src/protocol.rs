@@ -20,12 +20,38 @@ use crate::util::BytesRef;
 /// let topic = Topic::new(b"my-topic");
 /// assert_eq!(topic.as_ref(), b"my-topic");
 /// ```
-#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy)]
 pub struct Topic {
     /// The actual length of the topic data.
     len: u8,
     /// Fixed-size buffer storing the topic bytes.
     bytes: [u8; 64],
+}
+
+impl PartialEq for Topic {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for Topic {}
+
+impl std::hash::Hash for Topic {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
+    }
+}
+
+impl PartialOrd for Topic {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Topic {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_ref().cmp(other.as_ref())
+    }
 }
 
 impl Topic {
