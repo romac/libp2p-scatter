@@ -18,9 +18,9 @@ use libp2p::swarm::handler::{
 use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, StreamProtocol, SubstreamProtocol};
 use tracing::{debug, trace, warn};
 
+use crate::Config;
 use crate::codec::Codec;
 use crate::protocol::Message;
-use crate::Config;
 
 /// Protocol identifier for scatter.
 const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter/1.0.0");

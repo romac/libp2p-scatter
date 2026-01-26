@@ -62,8 +62,12 @@ impl Codec {
             Some(b) => b,
         };
 
+        // Need at least 2 bytes for tag and topic length
         if buf.remaining() < 2 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "message too short"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message too short",
+            ));
         }
 
         let tag = buf.get_u8();
