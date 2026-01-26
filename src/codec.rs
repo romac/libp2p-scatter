@@ -228,4 +228,58 @@ mod tests {
 
         assert_eq!(decoded, messages);
     }
+
+    #[test]
+    fn test_decode_invalid_tag() {
+        let mut codec = Codec::new();
+
+        // Encode a raw message with invalid tag (0xFF)
+        let mut buf = BytesMut::new();
+        // Manually construct: varint length + invalid_tag + topic_len + topic
+        let msg_bytes = &[0xFF, 0x04, b't', b'e', b's', b't'];
+        // Prepend varint length
+        let mut len_buf = unsigned_varint::encode::usize_buffer();
+        let len_slice = unsigned_varint::encode::usize(msg_bytes.len(), &mut len_buf);
+        buf.extend_from_slice(len_slice);
+        buf.extend_from_slice(msg_bytes);
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_decode_truncated_topic() {
+        let mut codec = Codec::new();
+
+        // Message claims 10-byte topic but only provides 2 bytes
+        let msg_bytes = &[0x00, 0x0A, b'a', b'b']; // Subscribe, topic_len=10, actual=2
+        let mut buf = BytesMut::new();
+        let mut len_buf = unsigned_varint::encode::usize_buffer();
+        let len_slice = unsigned_varint::encode::usize(msg_bytes.len(), &mut len_buf);
+        buf.extend_from_slice(len_slice);
+        buf.extend_from_slice(msg_bytes);
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_max_size_enforcement() {
+        let mut codec = Codec::new().with_max_size(10);
+        let topic = Topic::new(b"test");
+
+        // Try to decode a message larger than max_size
+        let large_payload = Bytes::from(vec![0u8; 100]);
+        let msg = Message::Broadcast(topic, large_payload);
+
+        let mut buf = BytesMut::new();
+        // Use a codec without size limit to encode
+        let mut encoder = Codec::new();
+        encoder.encode(msg, &mut buf).unwrap();
+
+        // Decoding with size limit should fail
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
 }
