@@ -280,6 +280,12 @@ impl ConnectionHandler for Handler {
     }
 
     fn on_behaviour_event(&mut self, message: Self::FromBehaviour) {
+        // Drop messages if outbound substream is permanently closed
+        if matches!(self.outbound, OutboundState::Closed) {
+            warn!("Dropping message: outbound substream permanently closed");
+            return;
+        }
+
         // Drop messages if queue is full
         if self.pending_messages.len() >= self.config.max_outbound_queue_size {
             warn!("Dropping message: queue full");
@@ -891,22 +897,19 @@ mod tests {
         // Close the substream
         handler.outbound = OutboundState::Closed;
 
-        // Try to add messages
+        // Try to add messages - they should be dropped, not queued
         handler.on_behaviour_event(Message::Subscribe(topic));
         handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"data")));
 
-        // Messages are queued but won't be sent
-        assert_eq!(handler.pending_messages.len(), 2);
+        // Messages are dropped when substream is permanently closed
+        assert_eq!(handler.pending_messages.len(), 0);
 
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Poll should return Pending (not request new substream because state is Closed)
+        // Poll should return Pending
         let result = handler.poll(&mut cx);
         assert!(matches!(result, Poll::Pending));
-
-        // Messages remain queued but can't be sent
-        assert_eq!(handler.pending_messages.len(), 2);
     }
 
     // ==================== Connection Keep-Alive Edge Cases ====================
@@ -934,13 +937,9 @@ mod tests {
             ..Handler::default()
         };
 
-        // Even with Closed state, if there are pending messages, keep alive
-        // (though they won't be sent)
+        // Messages are dropped when substream is closed, so queue stays empty
         handler.on_behaviour_event(Message::Subscribe(Topic::new(b"topic")));
-        assert!(handler.connection_keep_alive());
-
-        // Clear messages
-        handler.pending_messages.clear();
+        assert_eq!(handler.pending_messages.len(), 0);
 
         // No messages and Closed state, should not keep alive
         assert!(!handler.connection_keep_alive());
