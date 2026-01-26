@@ -56,12 +56,10 @@ pub struct Handler {
 }
 
 /// A framed read half of a substream.
-type FramedSubstreamRead =
-    FramedRead<futures::io::ReadHalf<libp2p::Stream>, Codec>;
+type FramedSubstreamRead = FramedRead<libp2p::Stream, Codec>;
 
 /// A framed write half of a substream.
-type FramedSubstreamWrite =
-    FramedWrite<futures::io::WriteHalf<libp2p::Stream>, Codec>;
+type FramedSubstreamWrite = FramedWrite<libp2p::Stream, Codec>;
 
 /// State of the inbound substream.
 enum InboundState {
@@ -313,9 +311,8 @@ impl ConnectionHandler for Handler {
             }) => {
                 // We got an inbound substream, create a framed reader for it
                 trace!("Inbound substream negotiated, creating framed reader");
-                let (read_half, _write_half) = futures::AsyncReadExt::split(stream);
                 let codec = Codec::new().with_max_size(self.config.max_message_size);
-                self.inbound = InboundState::Active(FramedRead::new(read_half, codec));
+                self.inbound = InboundState::Active(FramedRead::new(stream, codec));
             }
 
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
@@ -328,9 +325,8 @@ impl ConnectionHandler for Handler {
 
                 // Create a framed writer for the outbound substream
                 trace!("Outbound substream negotiated, creating framed writer");
-                let (_read_half, write_half) = futures::AsyncReadExt::split(stream);
                 let codec = Codec::new().with_max_size(self.config.max_message_size);
-                self.outbound = OutboundState::Ready(FramedWrite::new(write_half, codec));
+                self.outbound = OutboundState::Ready(FramedWrite::new(stream, codec));
             }
 
             ConnectionEvent::DialUpgradeError(DialUpgradeError { error, .. }) => {
