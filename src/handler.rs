@@ -88,6 +88,26 @@ impl OutboundState {
     }
 }
 
+/// Result of polling the inbound substream.
+enum InboundPollResult {
+    /// A message was received.
+    Received(Message),
+    /// An error occurred.
+    Error(io::Error),
+    /// The stream was closed by the remote.
+    Closed,
+    /// No data available yet.
+    Pending,
+}
+
+/// Result of polling the outbound substream.
+enum OutboundPollResult {
+    /// Need to request a new outbound substream.
+    RequestSubstream,
+    /// No action needed (either sent messages or waiting).
+    Continue,
+}
+
 impl Handler {
     /// Create a new handler with the given configuration.
     pub fn new(config: Config) -> Self {
@@ -101,6 +121,146 @@ impl Handler {
             outbound_substream_requested: false,
         }
     }
+
+    /// Poll the inbound substream for incoming messages.
+    fn poll_inbound(&mut self, cx: &mut Context<'_>) -> InboundPollResult {
+        let framed = match &mut self.inbound {
+            InboundState::Active(framed) => framed,
+            InboundState::None => return InboundPollResult::Pending,
+        };
+
+        match Pin::new(framed).poll_next(cx) {
+            Poll::Ready(Some(Ok(message))) => {
+                trace!(?message, "Received message on inbound substream");
+                InboundPollResult::Received(message)
+            }
+            Poll::Ready(Some(Err(e))) => {
+                debug!("Error reading from inbound substream: {e}");
+                self.inbound = InboundState::None;
+                InboundPollResult::Error(e)
+            }
+            Poll::Ready(None) => {
+                debug!("Inbound substream closed by remote");
+                self.inbound = InboundState::None;
+                InboundPollResult::Closed
+            }
+            Poll::Pending => InboundPollResult::Pending,
+        }
+    }
+
+    /// Poll the outbound substream and send any pending messages.
+    fn poll_outbound(&mut self, cx: &mut Context<'_>) -> OutboundPollResult {
+        loop {
+            match self.outbound.take() {
+                OutboundState::Ready(mut sink) => {
+                    match self.try_send_message(&mut sink, cx) {
+                        SendResult::Sent => {
+                            // Message sent, put sink back and try to send more
+                            self.outbound = OutboundState::Ready(sink);
+                        }
+                        SendResult::Pending(message) => {
+                            // Not ready to send, put message and sink back
+                            self.pending_messages.push_front(message);
+                            self.outbound = OutboundState::Ready(sink);
+                            return OutboundPollResult::Continue;
+                        }
+                        SendResult::Error => {
+                            // Error occurred, will need new substream
+                            self.outbound = OutboundState::None;
+                            return OutboundPollResult::Continue;
+                        }
+                        SendResult::NothingToSend => {
+                            self.outbound = OutboundState::Ready(sink);
+                            return OutboundPollResult::Continue;
+                        }
+                    }
+                }
+
+                OutboundState::None => {
+                    if self.should_request_substream() {
+                        trace!(
+                            pending_count = self.pending_messages.len(),
+                            "Requesting outbound substream for pending messages"
+                        );
+                        self.outbound_substream_requested = true;
+                        return OutboundPollResult::RequestSubstream;
+                    }
+                    return OutboundPollResult::Continue;
+                }
+
+                OutboundState::Closed => {
+                    self.outbound = OutboundState::Closed;
+                    return OutboundPollResult::Continue;
+                }
+            }
+        }
+    }
+
+    /// Try to send the next pending message on the sink.
+    fn try_send_message(
+        &mut self,
+        sink: &mut FramedSubstreamWrite,
+        cx: &mut Context<'_>,
+    ) -> SendResult {
+        let message = match self.pending_messages.pop_front() {
+            Some(msg) => msg,
+            None => return SendResult::NothingToSend,
+        };
+
+        trace!(?message, "Sending message on outbound substream");
+
+        // Check if sink is ready
+        match Pin::new(&mut *sink).poll_ready(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => {
+                debug!("Error on outbound substream: {}", e);
+                self.pending_messages.push_front(message);
+                return SendResult::Error;
+            }
+            Poll::Pending => return SendResult::Pending(message),
+        }
+
+        // Start sending the message
+        if let Err(e) = Pin::new(&mut *sink).start_send(message) {
+            debug!("Error sending on outbound substream: {}", e);
+            return SendResult::Error;
+        }
+
+        // Flush the message
+        match Pin::new(&mut *sink).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                trace!("Message sent successfully on outbound substream");
+                SendResult::Sent
+            }
+            Poll::Ready(Err(e)) => {
+                debug!("Error flushing on outbound substream: {}", e);
+                SendResult::Error
+            }
+            Poll::Pending => {
+                // Flush is pending but message was accepted
+                SendResult::Sent
+            }
+        }
+    }
+
+    /// Check if we should request a new outbound substream.
+    fn should_request_substream(&self) -> bool {
+        !self.pending_messages.is_empty()
+            && !self.outbound_substream_requested
+            && self.outbound_substream_attempts < MAX_SUBSTREAM_ATTEMPTS
+    }
+}
+
+/// Result of attempting to send a message.
+enum SendResult {
+    /// Message was sent successfully.
+    Sent,
+    /// Sink not ready, message returned for retry.
+    Pending(Message),
+    /// An error occurred.
+    Error,
+    /// No message to send.
+    NothingToSend,
 }
 
 impl Default for Handler {
@@ -232,126 +392,25 @@ impl ConnectionHandler for Handler {
         }
 
         // Poll the inbound substream for messages
-        if let InboundState::Active(ref mut framed) = self.inbound {
-            loop {
-                match Pin::new(&mut *framed).poll_next(cx) {
-                    Poll::Ready(Some(Ok(message))) => {
-                        trace!(?message, "Received message on inbound substream");
-                        return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
-                            HandlerEvent::Received(message),
-                        ));
-                    }
-                    Poll::Ready(Some(Err(e))) => {
-                        debug!("Error reading from inbound substream: {e}");
-                        self.inbound = InboundState::None;
-                        return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
-                            HandlerEvent::Error(e),
-                        ));
-                    }
-                    Poll::Ready(None) => {
-                        // Stream was closed gracefully by remote
-                        debug!("Inbound substream closed by remote");
-                        self.inbound = InboundState::None;
-                        break;
-                    }
-                    Poll::Pending => break,
-                }
+        match self.poll_inbound(cx) {
+            InboundPollResult::Received(message) => {
+                return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                    HandlerEvent::Received(message),
+                ));
             }
+            InboundPollResult::Error(e) => {
+                return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                    HandlerEvent::Error(e),
+                ));
+            }
+            InboundPollResult::Closed | InboundPollResult::Pending => {}
         }
 
         // Poll the outbound substream for sending messages
-        loop {
-            match self.outbound.take() {
-                OutboundState::Ready(mut sink) => {
-                    // If we have pending messages, try to send them
-                    if let Some(message) = self.pending_messages.pop_front() {
-                        trace!(?message, "Sending message on outbound substream");
-
-                        // First, poll ready to ensure we can send
-                        match Pin::new(&mut sink).poll_ready(cx) {
-                            Poll::Ready(Ok(())) => {
-                                // Start sending the message
-                                match Pin::new(&mut sink).start_send(message) {
-                                    Ok(()) => {
-                                        // Flush the message
-                                        match Pin::new(&mut sink).poll_flush(cx) {
-                                            Poll::Ready(Ok(())) => {
-                                                trace!(
-                                                    "Message sent successfully on outbound substream"
-                                                );
-                                                // Put sink back and continue to send more
-                                                self.outbound = OutboundState::Ready(sink);
-                                                // Continue loop to try sending more messages
-                                            }
-                                            Poll::Ready(Err(e)) => {
-                                                debug!(
-                                                    "Error flushing on outbound substream: {}",
-                                                    e
-                                                );
-                                                self.outbound = OutboundState::None;
-                                                // Don't clear pending messages, we'll retry with a new substream
-                                                break;
-                                            }
-                                            Poll::Pending => {
-                                                // Still flushing, put sink back
-                                                self.outbound = OutboundState::Ready(sink);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("Error sending on outbound substream: {}", e);
-                                        self.outbound = OutboundState::None;
-                                        break;
-                                    }
-                                }
-                            }
-                            Poll::Ready(Err(e)) => {
-                                // Error, need to reopen substream
-                                debug!("Error on outbound substream: {}", e);
-                                // Put message back
-                                self.pending_messages.push_front(message);
-                                self.outbound = OutboundState::None;
-                                break;
-                            }
-                            Poll::Pending => {
-                                // Not ready yet, put message back
-                                self.pending_messages.push_front(message);
-                                self.outbound = OutboundState::Ready(sink);
-                                break;
-                            }
-                        }
-                    } else {
-                        self.outbound = OutboundState::Ready(sink);
-                        break;
-                    }
-                }
-
-                OutboundState::None => {
-                    // Request a new outbound substream if we have messages and haven't given up
-                    if !self.pending_messages.is_empty()
-                        && !self.outbound_substream_requested
-                        && self.outbound_substream_attempts < MAX_SUBSTREAM_ATTEMPTS
-                    {
-                        trace!(
-                            pending_count = self.pending_messages.len(),
-                            "Requesting outbound substream for pending messages"
-                        );
-
-                        self.outbound_substream_requested = true;
-
-                        return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-                            protocol: SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ()),
-                        });
-                    }
-                    break;
-                }
-
-                OutboundState::Closed => {
-                    self.outbound = OutboundState::Closed;
-                    break;
-                }
-            }
+        if let OutboundPollResult::RequestSubstream = self.poll_outbound(cx) {
+            return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
+                protocol: SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ()),
+            });
         }
 
         Poll::Pending
