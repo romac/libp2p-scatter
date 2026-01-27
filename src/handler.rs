@@ -8,19 +8,16 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use asynchronous_codec::{FramedRead, FramedWrite};
 use futures::{Sink, Stream};
-use libp2p::core::upgrade::ReadyUpgrade;
 use libp2p::swarm::handler::{
     ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
     StreamUpgradeError,
 };
-use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, StreamProtocol, SubstreamProtocol};
+use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, SubstreamProtocol};
 use tracing::{debug, trace, warn};
 
 use crate::Config;
-use crate::codec::Codec;
-use crate::protocol::Message;
+use crate::protocol::{FramedSubstreamRead, FramedSubstreamWrite, Message, ProtocolConfig};
 
 /// Maximum number of attempts to open an outbound substream before giving up.
 const MAX_SUBSTREAM_ATTEMPTS: usize = 5;
@@ -52,18 +49,12 @@ pub struct Handler {
     outbound_substream_requested: bool,
 }
 
-/// A framed read half of a substream.
-type FramedSubstreamRead = FramedRead<libp2p::Stream, Codec>;
-
-/// A framed write half of a substream.
-type FramedSubstreamWrite = FramedWrite<libp2p::Stream, Codec>;
-
 /// State of the inbound substream.
 enum InboundState {
     /// No inbound substream yet.
     None,
     /// Active framed reader for receiving messages.
-    Active(FramedSubstreamRead),
+    Active(FramedSubstreamRead<libp2p::Stream>),
 }
 
 /// State of the outbound substream.
@@ -71,7 +62,7 @@ enum OutboundState {
     /// No outbound substream yet.
     None,
     /// Active framed writer ready to send messages.
-    Ready(FramedSubstreamWrite),
+    Ready(FramedSubstreamWrite<libp2p::Stream>),
     /// The substream has been closed or errored.
     Closed,
 }
@@ -194,7 +185,7 @@ impl Handler {
     /// Try to send the next pending message on the sink.
     fn try_send_message(
         &mut self,
-        sink: &mut FramedSubstreamWrite,
+        sink: &mut FramedSubstreamWrite<libp2p::Stream>,
         cx: &mut Context<'_>,
     ) -> SendResult {
         let message = match self.pending_messages.pop_front() {
@@ -267,13 +258,13 @@ impl Default for Handler {
 impl ConnectionHandler for Handler {
     type FromBehaviour = Message;
     type ToBehaviour = HandlerEvent;
-    type InboundProtocol = ReadyUpgrade<StreamProtocol>;
-    type OutboundProtocol = ReadyUpgrade<StreamProtocol>;
+    type InboundProtocol = ProtocolConfig;
+    type OutboundProtocol = ProtocolConfig;
     type InboundOpenInfo = ();
     type OutboundOpenInfo = ();
 
     fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        SubstreamProtocol::new(ReadyUpgrade::new(self.config.protocol_name.clone()), ())
+        SubstreamProtocol::new(ProtocolConfig::from(&self.config), ())
     }
 
     fn on_behaviour_event(&mut self, message: Self::FromBehaviour) {
@@ -313,9 +304,8 @@ impl ConnectionHandler for Handler {
                 ..
             }) => {
                 // We got an inbound substream, create a framed reader for it
-                trace!("Inbound substream negotiated, creating framed reader");
-                let codec = Codec::new().with_max_size(self.config.max_message_size);
-                self.inbound = InboundState::Active(FramedRead::new(stream, codec));
+                trace!("Inbound substream negotiated");
+                self.inbound = InboundState::Active(stream);
             }
 
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
@@ -327,9 +317,8 @@ impl ConnectionHandler for Handler {
                 self.outbound_substream_requested = false;
 
                 // Create a framed writer for the outbound substream
-                trace!("Outbound substream negotiated, creating framed writer");
-                let codec = Codec::new().with_max_size(self.config.max_message_size);
-                self.outbound = OutboundState::Ready(FramedWrite::new(stream, codec));
+                trace!("Outbound substream negotiated");
+                self.outbound = OutboundState::Ready(stream);
             }
 
             ConnectionEvent::DialUpgradeError(DialUpgradeError { error, .. }) => {
@@ -418,10 +407,7 @@ impl ConnectionHandler for Handler {
         // Poll the outbound substream for sending messages
         if let OutboundPollResult::RequestSubstream = self.poll_outbound(cx) {
             return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-                protocol: SubstreamProtocol::new(
-                    ReadyUpgrade::new(self.config.protocol_name.clone()),
-                    (),
-                ),
+                protocol: SubstreamProtocol::new(ProtocolConfig::from(&self.config), ()),
             });
         }
 

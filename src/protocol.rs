@@ -1,8 +1,72 @@
 use core::fmt;
+use std::convert::Infallible;
 
 use bytes::Bytes;
 
+use asynchronous_codec::{FramedRead, FramedWrite};
+use futures::{AsyncRead, AsyncWrite, future};
+use libp2p::core::UpgradeInfo;
+use libp2p::{InboundUpgrade, OutboundUpgrade, StreamProtocol};
+
 use crate::util::BytesRef;
+use crate::{Codec, Config};
+
+pub struct ProtocolConfig {
+    pub protocol_name: StreamProtocol,
+    pub max_message_size: usize,
+}
+
+impl From<&Config> for ProtocolConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            protocol_name: config.protocol_name.clone(),
+            max_message_size: config.max_message_size,
+        }
+    }
+}
+
+impl UpgradeInfo for ProtocolConfig {
+    type Info = StreamProtocol;
+    type InfoIter = std::iter::Once<Self::Info>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        std::iter::once(self.protocol_name.clone())
+    }
+}
+
+/// A framed read half of a substream.
+pub(crate) type FramedSubstreamRead<S> = FramedRead<S, Codec>;
+
+/// A framed write half of a substream.
+pub(crate) type FramedSubstreamWrite<S> = FramedWrite<S, Codec>;
+
+impl<S> InboundUpgrade<S> for ProtocolConfig
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    type Output = FramedSubstreamRead<S>;
+    type Future = future::Ready<Result<Self::Output, Self::Error>>;
+    type Error = Infallible;
+
+    fn upgrade_inbound(self, socket: S, _info: Self::Info) -> Self::Future {
+        let codec = Codec::new().with_max_size(self.max_message_size);
+        future::ok(FramedRead::new(socket, codec))
+    }
+}
+
+impl<S> OutboundUpgrade<S> for ProtocolConfig
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    type Output = FramedSubstreamWrite<S>;
+    type Future = future::Ready<Result<Self::Output, Self::Error>>;
+    type Error = Infallible;
+
+    fn upgrade_outbound(self, socket: S, _info: Self::Info) -> Self::Future {
+        let codec = Codec::new().with_max_size(self.max_message_size);
+        future::ok(FramedWrite::new(socket, codec))
+    }
+}
 
 /// A topic identifier for the broadcast protocol.
 ///
