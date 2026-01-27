@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.4.0-rc.1
+
 ### Breaking Changes
 
 * **config**: Rename `Config::max_buf_size` to `Config::max_message_size`.
