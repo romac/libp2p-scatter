@@ -257,7 +257,10 @@ impl NetworkBehaviour for Behaviour {
                 }
 
                 self.connected_peers.entry(peer).or_default().insert(topic);
-                self.topic_subscribers.entry(topic).or_default().insert(peer);
+                self.topic_subscribers
+                    .entry(topic)
+                    .or_default()
+                    .insert(peer);
 
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Subscribed(peer, topic)));
