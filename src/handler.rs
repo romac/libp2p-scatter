@@ -22,9 +22,6 @@ use crate::Config;
 use crate::codec::Codec;
 use crate::protocol::Message;
 
-/// Protocol identifier for scatter.
-const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter/1.0.0");
-
 /// Maximum number of attempts to open an outbound substream before giving up.
 const MAX_SUBSTREAM_ATTEMPTS: usize = 5;
 
@@ -276,7 +273,7 @@ impl ConnectionHandler for Handler {
     type OutboundOpenInfo = ();
 
     fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ())
+        SubstreamProtocol::new(ReadyUpgrade::new(self.config.protocol_name.clone()), ())
     }
 
     fn on_behaviour_event(&mut self, message: Self::FromBehaviour) {
@@ -421,7 +418,10 @@ impl ConnectionHandler for Handler {
         // Poll the outbound substream for sending messages
         if let OutboundPollResult::RequestSubstream = self.poll_outbound(cx) {
             return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-                protocol: SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ()),
+                protocol: SubstreamProtocol::new(
+                    ReadyUpgrade::new(self.config.protocol_name.clone()),
+                    (),
+                ),
             });
         }
 
