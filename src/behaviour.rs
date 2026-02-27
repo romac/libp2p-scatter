@@ -5,9 +5,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use fnv::{FnvHashMap, FnvHashSet};
 use libp2p::swarm::derive_prelude::FromSwarm;
-use libp2p::swarm::{
-    CloseConnection, ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, ToSwarm,
-};
+use libp2p::swarm::{ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, ToSwarm};
 use libp2p::{Multiaddr, PeerId};
 
 use crate::Config;
@@ -291,13 +289,17 @@ impl NetworkBehaviour for Behaviour {
                     .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(peer, topic)));
             }
 
-            HandlerEvent::Error(e) => {
-                tracing::debug!("Handler error: {e}");
+            HandlerEvent::InboundError(e) => {
+                tracing::warn!(%peer, %connection_id, "Inbound substream error: {e}");
+                // Don't close the connection — other protocols may be using it.
+                // The handler has already dropped the inbound state; the remote
+                // can open a new substream if it wishes.
+            }
 
-                self.events.push_back(ToSwarm::CloseConnection {
-                    peer_id: peer,
-                    connection: CloseConnection::One(connection_id),
-                });
+            HandlerEvent::InboundClosed => {
+                tracing::debug!(%peer, %connection_id, "Inbound substream closed by remote");
+                // Don't close the connection — other protocols may be using it.
+                // The handler has already reset inbound state.
             }
         }
     }
@@ -806,5 +808,93 @@ mod tests {
         assert!(topics.contains(&topic1));
         assert!(topics.contains(&topic2));
         assert_eq!(topics.len(), 2);
+    }
+
+    // ==================== Inbound Error/Close Handling Tests ====================
+
+    #[test]
+    fn test_inbound_error_does_not_close_connection() {
+        use crate::handler::HandlerEvent;
+
+        let mut behaviour = Behaviour::new(Config::default());
+        let peer = PeerId::random();
+        let connection_id = ConnectionId::new_unchecked(0);
+
+        behaviour.inject_connected(&peer);
+
+        // Simulate an inbound read error
+        behaviour.on_connection_handler_event(
+            peer,
+            connection_id,
+            HandlerEvent::InboundError(std::io::Error::other("test error")),
+        );
+
+        // No CloseConnection event should be emitted
+        let waker = futures::task::noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+        assert!(matches!(behaviour.poll(&mut ctx), Poll::Pending));
+    }
+
+    #[test]
+    fn test_inbound_closed_does_not_close_connection() {
+        use crate::handler::HandlerEvent;
+
+        let mut behaviour = Behaviour::new(Config::default());
+        let peer = PeerId::random();
+        let connection_id = ConnectionId::new_unchecked(0);
+
+        behaviour.inject_connected(&peer);
+
+        // Simulate inbound substream closed by remote
+        behaviour.on_connection_handler_event(peer, connection_id, HandlerEvent::InboundClosed);
+
+        // No CloseConnection event should be emitted
+        let waker = futures::task::noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+        assert!(matches!(behaviour.poll(&mut ctx), Poll::Pending));
+    }
+
+    #[test]
+    fn test_inbound_error_preserves_peer_subscriptions() {
+        use crate::handler::HandlerEvent;
+
+        let mut behaviour = Behaviour::new(Config::default());
+        let peer = PeerId::random();
+        let topic = Topic::new(b"topic");
+        let connection_id = ConnectionId::new_unchecked(0);
+
+        behaviour.inject_connected(&peer);
+
+        // Peer subscribes to a topic
+        behaviour.on_connection_handler_event(
+            peer,
+            connection_id,
+            HandlerEvent::Received(Message::Subscribe(topic)),
+        );
+
+        // Drain the Subscribed event
+        let waker = futures::task::noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+        assert!(matches!(
+            behaviour.poll(&mut ctx),
+            Poll::Ready(ToSwarm::GenerateEvent(Event::Subscribed(_, _)))
+        ));
+
+        // Now simulate an inbound error
+        behaviour.on_connection_handler_event(
+            peer,
+            connection_id,
+            HandlerEvent::InboundError(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            )),
+        );
+
+        // Peer's subscriptions should still be intact
+        let peers: Vec<_> = behaviour.peers(topic).collect();
+        assert!(peers.contains(&peer));
+
+        let topics: Vec<_> = behaviour.topics(&peer).unwrap().copied().collect();
+        assert!(topics.contains(&topic));
     }
 }

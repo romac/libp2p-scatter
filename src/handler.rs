@@ -27,8 +27,10 @@ const MAX_SUBSTREAM_ATTEMPTS: usize = 5;
 pub enum HandlerEvent {
     /// A message was received from the remote peer.
     Received(Message),
-    /// An error occurred on the substream.
-    Error(io::Error),
+    /// An I/O error occurred reading from the inbound substream.
+    InboundError(io::Error),
+    /// The inbound substream was closed by the remote peer.
+    InboundClosed,
 }
 
 /// The connection handler for the scatter protocol.
@@ -388,17 +390,12 @@ impl ConnectionHandler for Handler {
             }
             InboundPollResult::Error(e) => {
                 return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
-                    HandlerEvent::Error(e),
+                    HandlerEvent::InboundError(e),
                 ));
             }
             InboundPollResult::Closed => {
-                // Inbound substream was closed by remote. Treat this as an error
-                // to trigger connection cleanup and avoid stale subscription state.
                 return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
-                    HandlerEvent::Error(io::Error::new(
-                        io::ErrorKind::ConnectionReset,
-                        "inbound substream closed by remote",
-                    )),
+                    HandlerEvent::InboundClosed,
                 ));
             }
             InboundPollResult::Pending => {}

@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-Nothing yet.
+### Breaking Changes
+
+* **handler**: Split `HandlerEvent::Error(io::Error)` into `InboundError(io::Error)` and `InboundClosed` to distinguish between transient I/O errors and the remote peer closing the inbound substream.
+
+### Changed
+
+* **behaviour**: Neither inbound substream errors nor the remote closing the substream close the connection, since other protocols may be using it. The handler resets its inbound state and the remote can open a new substream.
 
 ## v0.4.0-rc.1
 
