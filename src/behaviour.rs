@@ -301,6 +301,15 @@ impl NetworkBehaviour for Behaviour {
                 // Don't close the connection — other protocols may be using it.
                 // The handler has already reset inbound state.
             }
+
+            HandlerEvent::LegacyFallback => {
+                tracing::debug!(%peer, %connection_id, "Connection fell back to the legacy protocol");
+
+                #[cfg(feature = "metrics")]
+                if let Some(metrics) = self.metrics.as_mut() {
+                    metrics.register_legacy_connection();
+                }
+            }
         }
     }
 

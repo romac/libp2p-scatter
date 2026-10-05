@@ -37,6 +37,9 @@ pub enum HandlerEvent {
     InboundError(io::Error),
     /// The inbound substream was closed by the remote peer.
     InboundClosed,
+    /// The connection fell back to the legacy protocol.
+    /// Sent at most once per connection.
+    LegacyFallback,
 }
 
 /// The connection handler for the scatter protocol.
@@ -57,6 +60,8 @@ pub struct Handler {
     outbound_substream_requested: bool,
     /// Number of legacy substreams being opened.
     legacy_substreams: usize,
+    /// Whether the connection fell back to the legacy protocol.
+    legacy_fallback: bool,
 }
 
 /// State of the inbound substream.
@@ -119,6 +124,7 @@ impl Handler {
             pending_events: VecDeque::new(),
             outbound_substream_requested: false,
             legacy_substreams: 0,
+            legacy_fallback: false,
         }
     }
 
@@ -267,6 +273,14 @@ impl Handler {
         }
     }
 
+    /// Notify the behaviour the first time the connection falls back to the legacy protocol.
+    fn on_legacy_fallback(&mut self) {
+        if !self.legacy_fallback {
+            self.legacy_fallback = true;
+            self.pending_events.push_back(HandlerEvent::LegacyFallback);
+        }
+    }
+
     /// Check if we should request a new outbound substream.
     fn should_request_substream(&self) -> bool {
         !self.pending_messages.is_empty()
@@ -348,6 +362,7 @@ impl ConnectionHandler for Handler {
                     }
                     Inbound::Legacy(message) => {
                         trace!(?message, "Received message on legacy substream");
+                        self.on_legacy_fallback();
                         self.pending_events
                             .push_back(HandlerEvent::Received(message));
                     }
@@ -368,9 +383,10 @@ impl ConnectionHandler for Handler {
                         self.outbound = OutboundState::Ready(stream);
                     }
                     Outbound::LegacyOnly => {
-                        debug!("Remote only supports the legacy protocol");
+                        trace!("Remote only supports the legacy protocol");
                         self.outbound_substream_requested = false;
                         self.outbound = OutboundState::Legacy;
+                        self.on_legacy_fallback();
                     }
                     Outbound::LegacySent => {
                         trace!("Message sent on legacy substream");
@@ -1032,6 +1048,14 @@ mod tests {
         assert!(matches!(handler.outbound, OutboundState::Legacy));
         assert!(!handler.outbound_substream_requested);
 
+        // The behaviour is notified of the fallback
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerEvent::LegacyFallback
+            ))
+        ));
+
         // The message is sent on its own legacy substream
         match handler.poll(&mut cx) {
             Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol }) => {
@@ -1149,12 +1173,48 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
 
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerEvent::LegacyFallback
+            ))
+        ));
+
         match handler.poll(&mut cx) {
             Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::Received(msg))) => {
                 assert_eq!(msg, message);
             }
             _ => panic!("Expected NotifyBehaviour with Received event"),
         }
+    }
+
+    #[test]
+    fn test_legacy_fallback_is_notified_once() {
+        let mut handler = Handler::default();
+        let topic = Topic::new(b"topic");
+
+        // The connection falls back to the legacy protocol in both directions
+        handler.on_connection_event(ConnectionEvent::FullyNegotiatedOutbound(
+            FullyNegotiatedOutbound {
+                protocol: Outbound::LegacyOnly,
+                info: (),
+            },
+        ));
+        for _ in 0..2 {
+            handler.on_connection_event(ConnectionEvent::FullyNegotiatedInbound(
+                FullyNegotiatedInbound {
+                    protocol: Inbound::Legacy(Message::Subscribe(topic)),
+                    info: (),
+                },
+            ));
+        }
+
+        let fallbacks = handler
+            .pending_events
+            .iter()
+            .filter(|event| matches!(event, HandlerEvent::LegacyFallback))
+            .count();
+        assert_eq!(fallbacks, 1);
     }
 
     #[test]

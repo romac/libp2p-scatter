@@ -32,6 +32,9 @@ pub struct Metrics {
     topic_msg_recv_counts: Family<Topic, Counter>,
     /// Amount of data received for each topic, in bytes.
     topic_msg_recv_bytes: Family<Topic, Counter>,
+
+    /// Number of connections that fell back to the libp2p-scatter 0.3 protocol.
+    legacy_connections: Counter,
 }
 
 type EverSubscribed = bool;
@@ -78,6 +81,13 @@ impl Metrics {
             "Amount of data received for each topic, in bytes"
         );
 
+        let legacy_connections = Counter::default();
+        registry.register(
+            "legacy_connections",
+            "Number of connections that fell back to the libp2p-scatter 0.3 protocol",
+            legacy_connections.clone(),
+        );
+
         Self {
             topic_info: HashMap::default(),
             topic_subscription_status,
@@ -87,6 +97,7 @@ impl Metrics {
             topic_msg_sent_bytes,
             topic_msg_recv_counts,
             topic_msg_recv_bytes,
+            legacy_connections,
         }
     }
 
@@ -146,6 +157,11 @@ impl Metrics {
         self.topic_msg_recv_bytes
             .get_or_create(topic)
             .inc_by(bytes as u64);
+    }
+
+    /// Register that a connection fell back to the legacy protocol.
+    pub(crate) fn register_legacy_connection(&mut self) {
+        self.legacy_connections.inc();
     }
 }
 
@@ -306,6 +322,18 @@ mod tests {
 
         let bytes = metrics.topic_msg_recv_bytes.get_or_create(&topic);
         assert_eq!(bytes.get(), 300);
+    }
+
+    // ==================== Legacy Connection Tests ====================
+
+    #[test]
+    fn test_register_legacy_connection() {
+        let mut metrics = make_metrics();
+
+        metrics.register_legacy_connection();
+        metrics.register_legacy_connection();
+
+        assert_eq!(metrics.legacy_connections.get(), 2);
     }
 
     // ==================== Multiple Topics Tests ====================
