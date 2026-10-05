@@ -11,16 +11,22 @@ use std::task::{Context, Poll};
 use futures::{Sink, Stream};
 use libp2p::swarm::handler::{
     ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
-    StreamUpgradeError,
+    ListenUpgradeError, StreamUpgradeError,
 };
 use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, SubstreamProtocol};
 use tracing::{debug, trace, warn};
 
-use crate::Config;
-use crate::protocol::{FramedSubstreamRead, FramedSubstreamWrite, Message, ProtocolConfig};
+use crate::protocol::{
+    FramedSubstreamRead, FramedSubstreamWrite, Inbound, Message, Outbound, OutboundProtocol,
+    ProtocolConfig,
+};
+use crate::{Config, legacy};
 
 /// Maximum number of attempts to open an outbound substream before giving up.
 const MAX_SUBSTREAM_ATTEMPTS: usize = 5;
+
+/// Maximum number of legacy substreams being opened at the same time.
+const MAX_LEGACY_SUBSTREAMS: usize = 8;
 
 /// Event sent from the handler to the behaviour.
 #[derive(Debug)]
@@ -49,6 +55,8 @@ pub struct Handler {
     pending_events: VecDeque<HandlerEvent>,
     /// Whether we've requested an outbound substream.
     outbound_substream_requested: bool,
+    /// Number of legacy substreams being opened.
+    legacy_substreams: usize,
 }
 
 /// State of the inbound substream.
@@ -65,6 +73,9 @@ enum OutboundState {
     None,
     /// Active framed writer ready to send messages.
     Ready(FramedSubstreamWrite<libp2p::Stream>),
+    /// The remote only supports the legacy protocol, which uses
+    /// a new substream for each message.
+    Legacy,
     /// The substream has been closed or errored.
     Closed,
 }
@@ -91,7 +102,7 @@ enum InboundPollResult {
 /// Result of polling the outbound substream.
 enum OutboundPollResult {
     /// Need to request a new outbound substream.
-    RequestSubstream,
+    RequestSubstream(OutboundProtocol),
     /// No action needed (either sent messages or waiting).
     Continue,
 }
@@ -107,6 +118,7 @@ impl Handler {
             outbound_substream_attempts: 0,
             pending_events: VecDeque::new(),
             outbound_substream_requested: false,
+            legacy_substreams: 0,
         }
     }
 
@@ -171,7 +183,31 @@ impl Handler {
                             "Requesting outbound substream for pending messages"
                         );
                         self.outbound_substream_requested = true;
-                        return OutboundPollResult::RequestSubstream;
+                        return OutboundPollResult::RequestSubstream(OutboundProtocol::Stream(
+                            ProtocolConfig::from(&self.config),
+                        ));
+                    }
+                    return OutboundPollResult::Continue;
+                }
+
+                OutboundState::Legacy => {
+                    self.outbound = OutboundState::Legacy;
+                    if self.legacy_substreams >= MAX_LEGACY_SUBSTREAMS {
+                        return OutboundPollResult::Continue;
+                    }
+                    while let Some(message) = self.pending_messages.pop_front() {
+                        let Some(encoded) = legacy::encode(&message) else {
+                            warn!(
+                                topic = %message.topic(),
+                                "Dropping message: topic too long for the legacy protocol"
+                            );
+                            continue;
+                        };
+                        trace!(?message, "Requesting legacy substream for message");
+                        self.legacy_substreams += 1;
+                        return OutboundPollResult::RequestSubstream(OutboundProtocol::Legacy(
+                            encoded,
+                        ));
                     }
                     return OutboundPollResult::Continue;
                 }
@@ -261,7 +297,7 @@ impl ConnectionHandler for Handler {
     type FromBehaviour = Message;
     type ToBehaviour = HandlerEvent;
     type InboundProtocol = ProtocolConfig;
-    type OutboundProtocol = ProtocolConfig;
+    type OutboundProtocol = OutboundProtocol;
     type InboundOpenInfo = ();
     type OutboundOpenInfo = ();
 
@@ -302,29 +338,53 @@ impl ConnectionHandler for Handler {
     ) {
         match event {
             ConnectionEvent::FullyNegotiatedInbound(FullyNegotiatedInbound {
-                protocol: stream,
-                ..
+                protocol, ..
             }) => {
-                // We got an inbound substream, create a framed reader for it
-                trace!("Inbound substream negotiated");
-                self.inbound = InboundState::Active(stream);
+                match protocol {
+                    Inbound::Stream(stream) => {
+                        // We got an inbound substream, create a framed reader for it
+                        trace!("Inbound substream negotiated");
+                        self.inbound = InboundState::Active(stream);
+                    }
+                    Inbound::Legacy(message) => {
+                        trace!(?message, "Received message on legacy substream");
+                        self.pending_events
+                            .push_back(HandlerEvent::Received(message));
+                    }
+                }
             }
 
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
-                protocol: stream,
-                ..
+                protocol, ..
             }) => {
                 // Reset the attempt counter on success
                 self.outbound_substream_attempts = 0;
-                self.outbound_substream_requested = false;
 
-                // Create a framed writer for the outbound substream
-                trace!("Outbound substream negotiated");
-                self.outbound = OutboundState::Ready(stream);
+                match protocol {
+                    Outbound::Stream(stream) => {
+                        // Create a framed writer for the outbound substream
+                        trace!("Outbound substream negotiated");
+                        self.outbound_substream_requested = false;
+                        self.outbound = OutboundState::Ready(stream);
+                    }
+                    Outbound::LegacyOnly => {
+                        debug!("Remote only supports the legacy protocol");
+                        self.outbound_substream_requested = false;
+                        self.outbound = OutboundState::Legacy;
+                    }
+                    Outbound::LegacySent => {
+                        trace!("Message sent on legacy substream");
+                        self.legacy_substreams -= 1;
+                    }
+                }
             }
 
             ConnectionEvent::DialUpgradeError(DialUpgradeError { error, .. }) => {
-                self.outbound_substream_requested = false;
+                match self.outbound {
+                    // The message sent on this legacy substream is lost.
+                    OutboundState::Legacy => self.legacy_substreams -= 1,
+                    _ => self.outbound_substream_requested = false,
+                }
                 self.outbound_substream_attempts += 1;
 
                 match error {
@@ -337,10 +397,14 @@ impl ConnectionHandler for Handler {
                     StreamUpgradeError::Io(e) => {
                         debug!("Outbound substream I/O error: {}", e);
                     }
-                    StreamUpgradeError::Apply(v) => match v {},
+                    StreamUpgradeError::Apply(e) => {
+                        debug!("Outbound substream upgrade failed: {}", e);
+                    }
                 }
 
-                if self.outbound_substream_attempts >= MAX_SUBSTREAM_ATTEMPTS {
+                if self.outbound_substream_attempts >= MAX_SUBSTREAM_ATTEMPTS
+                    && !matches!(self.outbound, OutboundState::Closed)
+                {
                     warn!(
                         "Failed to open outbound substream after {} attempts, giving up",
                         MAX_SUBSTREAM_ATTEMPTS
@@ -353,9 +417,9 @@ impl ConnectionHandler for Handler {
                 }
             }
 
-            ConnectionEvent::ListenUpgradeError(_) => {
+            ConnectionEvent::ListenUpgradeError(ListenUpgradeError { error, .. }) => {
                 // Inbound upgrade errors are not fatal, we just wait for another inbound stream
-                debug!("Inbound substream upgrade failed");
+                debug!("Inbound substream upgrade failed: {}", error);
             }
 
             _ => {}
@@ -402,9 +466,9 @@ impl ConnectionHandler for Handler {
         }
 
         // Poll the outbound substream for sending messages
-        if let OutboundPollResult::RequestSubstream = self.poll_outbound(cx) {
+        if let OutboundPollResult::RequestSubstream(protocol) = self.poll_outbound(cx) {
             return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-                protocol: SubstreamProtocol::new(ProtocolConfig::from(&self.config), ()),
+                protocol: SubstreamProtocol::new(protocol, ()),
             });
         }
 
@@ -412,7 +476,8 @@ impl ConnectionHandler for Handler {
     }
 
     fn connection_keep_alive(&self) -> bool {
-        // Keep connection alive if we have pending messages or active substreams
+        // Keep connection alive if we have pending messages, active substreams,
+        // or a remote using the legacy protocol
         !self.pending_messages.is_empty()
             || !matches!(self.inbound, InboundState::None)
             || !matches!(self.outbound, OutboundState::None | OutboundState::Closed)
@@ -626,7 +691,7 @@ mod tests {
     fn test_dial_upgrade_error_increments_attempts() {
         let mut handler = Handler::default();
 
-        let error = StreamUpgradeError::<std::convert::Infallible>::Timeout;
+        let error = StreamUpgradeError::<io::Error>::Timeout;
         let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
 
         handler.on_connection_event(event);
@@ -647,7 +712,7 @@ mod tests {
         // Simulate max failures
         handler.outbound_substream_attempts = MAX_SUBSTREAM_ATTEMPTS - 1;
 
-        let error = StreamUpgradeError::<std::convert::Infallible>::NegotiationFailed;
+        let error = StreamUpgradeError::<io::Error>::NegotiationFailed;
         let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
 
         handler.on_connection_event(event);
@@ -663,7 +728,7 @@ mod tests {
         let mut handler = Handler::default();
 
         let io_err = io::Error::new(io::ErrorKind::ConnectionReset, "connection reset");
-        let error = StreamUpgradeError::<std::convert::Infallible>::Io(io_err);
+        let error = StreamUpgradeError::<io::Error>::Io(io_err);
         let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
 
         handler.on_connection_event(event);
@@ -783,7 +848,7 @@ mod tests {
         assert_eq!(handler.pending_messages.len(), 2);
 
         // Simulate dial error (not max attempts yet)
-        let error = StreamUpgradeError::<std::convert::Infallible>::Timeout;
+        let error = StreamUpgradeError::<io::Error>::Timeout;
         let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
         handler.on_connection_event(event);
 
@@ -823,7 +888,7 @@ mod tests {
             );
 
             // Simulate failure
-            let error = StreamUpgradeError::<std::convert::Infallible>::Timeout;
+            let error = StreamUpgradeError::<io::Error>::Timeout;
             let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
             handler.on_connection_event(event);
 
@@ -844,7 +909,7 @@ mod tests {
         ));
 
         // Final failure should close and clear messages
-        let error = StreamUpgradeError::<std::convert::Infallible>::Timeout;
+        let error = StreamUpgradeError::<io::Error>::Timeout;
         let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
         handler.on_connection_event(event);
 
@@ -936,5 +1001,168 @@ mod tests {
 
         // No messages and Closed state, should not keep alive
         assert!(!handler.connection_keep_alive());
+    }
+
+    // ==================== Legacy Protocol Tests ====================
+
+    #[test]
+    fn test_legacy_only_remote_switches_to_legacy_mode() {
+        let mut handler = Handler::default();
+        let message = Message::Subscribe(Topic::new(b"topic"));
+        handler.on_behaviour_event(message.clone());
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First, negotiate a long-lived substream
+        match handler.poll(&mut cx) {
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol }) => {
+                assert!(matches!(protocol.upgrade(), OutboundProtocol::Stream(_)));
+            }
+            _ => panic!("Expected OutboundSubstreamRequest"),
+        }
+
+        // The remote only supports the legacy protocol
+        handler.on_connection_event(ConnectionEvent::FullyNegotiatedOutbound(
+            FullyNegotiatedOutbound {
+                protocol: Outbound::LegacyOnly,
+                info: (),
+            },
+        ));
+        assert!(matches!(handler.outbound, OutboundState::Legacy));
+        assert!(!handler.outbound_substream_requested);
+
+        // The message is sent on its own legacy substream
+        match handler.poll(&mut cx) {
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol }) => {
+                match protocol.upgrade() {
+                    OutboundProtocol::Legacy(encoded) => {
+                        assert_eq!(*encoded, legacy::encode(&message).unwrap());
+                    }
+                    _ => panic!("Expected legacy upgrade"),
+                }
+            }
+            _ => panic!("Expected OutboundSubstreamRequest"),
+        }
+        assert!(handler.pending_messages.is_empty());
+        assert_eq!(handler.legacy_substreams, 1);
+    }
+
+    #[test]
+    fn test_legacy_mode_limits_concurrent_substreams() {
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            ..Handler::default()
+        };
+        let topic = Topic::new(b"topic");
+
+        for _ in 0..=MAX_LEGACY_SUBSTREAMS {
+            handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"data")));
+        }
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for _ in 0..MAX_LEGACY_SUBSTREAMS {
+            assert!(matches!(
+                handler.poll(&mut cx),
+                Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+            ));
+        }
+
+        // All legacy substreams are in use
+        assert!(matches!(handler.poll(&mut cx), Poll::Pending));
+        assert_eq!(handler.pending_messages.len(), 1);
+
+        // Sending a message frees a legacy substream
+        handler.on_connection_event(ConnectionEvent::FullyNegotiatedOutbound(
+            FullyNegotiatedOutbound {
+                protocol: Outbound::LegacySent,
+                info: (),
+            },
+        ));
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+        ));
+        assert!(handler.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_mode_dial_error_frees_substream() {
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            legacy_substreams: 1,
+            ..Handler::default()
+        };
+
+        let error = StreamUpgradeError::<io::Error>::Timeout;
+        let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
+        handler.on_connection_event(event);
+
+        assert_eq!(handler.legacy_substreams, 0);
+        assert_eq!(handler.outbound_substream_attempts, 1);
+        assert!(matches!(handler.outbound, OutboundState::Legacy));
+    }
+
+    #[test]
+    fn test_legacy_mode_drops_message_with_long_topic() {
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            ..Handler::default()
+        };
+        let message = Message::Subscribe(Topic::new(b"topic"));
+
+        handler.on_behaviour_event(Message::Subscribe(Topic::new(&[b'x'; Topic::MAX_LENGTH])));
+        handler.on_behaviour_event(message.clone());
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match handler.poll(&mut cx) {
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol }) => {
+                match protocol.upgrade() {
+                    OutboundProtocol::Legacy(encoded) => {
+                        assert_eq!(*encoded, legacy::encode(&message).unwrap());
+                    }
+                    _ => panic!("Expected legacy upgrade"),
+                }
+            }
+            _ => panic!("Expected OutboundSubstreamRequest"),
+        }
+        assert!(handler.pending_messages.is_empty());
+        assert_eq!(handler.legacy_substreams, 1);
+    }
+
+    #[test]
+    fn test_legacy_inbound_message_is_emitted() {
+        let mut handler = Handler::default();
+        let message = Message::Broadcast(Topic::new(b"topic"), Bytes::from_static(b"data"));
+
+        handler.on_connection_event(ConnectionEvent::FullyNegotiatedInbound(
+            FullyNegotiatedInbound {
+                protocol: Inbound::Legacy(message.clone()),
+                info: (),
+            },
+        ));
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match handler.poll(&mut cx) {
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::Received(msg))) => {
+                assert_eq!(msg, message);
+            }
+            _ => panic!("Expected NotifyBehaviour with Received event"),
+        }
+    }
+
+    #[test]
+    fn test_keep_alive_in_legacy_mode() {
+        let handler = Handler {
+            outbound: OutboundState::Legacy,
+            ..Handler::default()
+        };
+        assert!(handler.connection_keep_alive());
     }
 }

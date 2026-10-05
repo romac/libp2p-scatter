@@ -1,6 +1,7 @@
 mod behaviour;
 mod codec;
 mod handler;
+mod legacy;
 mod protocol;
 mod util;
 
@@ -27,6 +28,10 @@ pub struct Config {
 
     /// Maximum number of pending messages in the outbound queue.
     pub max_outbound_queue_size: usize,
+
+    /// Whether to also support the protocol of libp2p-scatter 0.3 (`/ax/broadcast/1.0.0`),
+    /// to exchange messages with peers that do not support the current protocol.
+    pub legacy_protocol: bool,
 }
 
 impl Config {
@@ -47,6 +52,12 @@ impl Config {
         self.max_outbound_queue_size = max_outbound_queue_size;
         self
     }
+
+    /// Sets whether to also support the protocol of libp2p-scatter 0.3.
+    pub fn legacy_protocol(mut self, legacy_protocol: bool) -> Self {
+        self.legacy_protocol = legacy_protocol;
+        self
+    }
 }
 
 impl Default for Config {
@@ -55,6 +66,7 @@ impl Default for Config {
             protocol_name: DEFAULT_PROTOCOL_NAME,
             max_message_size: 1024 * 1024 * 4, // 4 MiB
             max_outbound_queue_size: 1024,     // 1024 messages
+            legacy_protocol: false,
         }
     }
 }
