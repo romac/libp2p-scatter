@@ -1,4 +1,8 @@
 //! Tests for exchanging messages with peers running libp2p-scatter 0.3.
+//!
+//! libp2p-scatter 0.3 uses libp2p 0.56, so the 0.3 nodes have their own
+//! libp2p types. The `v03_*` helpers convert peer IDs, addresses, and keys
+//! between the two libp2p versions.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -6,15 +10,40 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
 use libp2p::identity::Keypair;
-use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
 #[cfg(feature = "metrics")]
 use libp2p_scatter::metrics::Registry;
 use libp2p_scatter::{Behaviour, Config, Event, Topic};
 use libp2p_scatter_v03 as v03;
+use libp2p_v056 as libp2p_v03;
 use tokio::time::timeout;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+type V03Swarm = libp2p_v03::Swarm<v03::Behaviour>;
+type V03SwarmEvent = libp2p_v03::swarm::SwarmEvent<v03::Event>;
+
+fn v03_peer_id(peer: PeerId) -> libp2p_v03::PeerId {
+    libp2p_v03::PeerId::from_bytes(&peer.to_bytes()).expect("Invalid peer ID")
+}
+
+fn from_v03_peer_id(peer: libp2p_v03::PeerId) -> PeerId {
+    PeerId::from_bytes(&peer.to_bytes()).expect("Invalid peer ID")
+}
+
+fn v03_addr(addr: Multiaddr) -> libp2p_v03::Multiaddr {
+    addr.to_string().parse().expect("Invalid address")
+}
+
+fn from_v03_addr(addr: libp2p_v03::Multiaddr) -> Multiaddr {
+    addr.to_string().parse().expect("Invalid address")
+}
+
+fn v03_keypair(keypair: &Keypair) -> libp2p_v03::identity::Keypair {
+    let encoded = keypair.to_protobuf_encoding().expect("Invalid keypair");
+    libp2p_v03::identity::Keypair::from_protobuf_encoding(&encoded).expect("Invalid keypair")
+}
 
 /// Returns the value of the `legacy_connections` metric.
 #[cfg(feature = "metrics")]
@@ -30,7 +59,7 @@ fn legacy_connections(registry: &Registry) -> u64 {
         .expect("Invalid value for metric legacy_connections")
 }
 
-fn build_swarm<B: NetworkBehaviour>(keypair: Keypair, behaviour: B) -> Swarm<B> {
+fn build_swarm(keypair: Keypair, behaviour: Behaviour) -> Swarm<Behaviour> {
     SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
@@ -45,16 +74,57 @@ fn build_swarm<B: NetworkBehaviour>(keypair: Keypair, behaviour: B) -> Swarm<B> 
         .build()
 }
 
+fn build_v03_swarm(keypair: libp2p_v03::identity::Keypair) -> V03Swarm {
+    libp2p_v03::SwarmBuilder::with_existing_identity(keypair)
+        .with_tokio()
+        .with_tcp(
+            libp2p_v03::tcp::Config::default(),
+            libp2p_v03::noise::Config::new,
+            libp2p_v03::yamux::Config::default,
+        )
+        .expect("Failed to create TCP transport")
+        .with_behaviour(|_| v03::Behaviour::new(v03::Config::default()))
+        .expect("Failed to create behaviour")
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build()
+}
+
+/// Starts listening on a random local port, and returns the listen address.
+async fn listen(swarm: &mut Swarm<Behaviour>) -> Multiaddr {
+    swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .expect("Failed to start listening");
+
+    loop {
+        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+            return address;
+        }
+    }
+}
+
+/// Starts listening on a random local port, and returns the listen address.
+async fn listen_v03(swarm: &mut V03Swarm) -> Multiaddr {
+    swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .expect("Failed to start listening");
+
+    loop {
+        if let V03SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+            return from_v03_addr(address);
+        }
+    }
+}
+
 /// A node running the current version and a node running libp2p-scatter 0.3.
 struct Pair {
     node: Swarm<Behaviour>,
-    v03: Swarm<v03::Behaviour>,
+    v03: V03Swarm,
 }
 
 #[derive(Debug)]
 enum PairEvent {
     Node(SwarmEvent<Event>),
-    V03(SwarmEvent<v03::Event>),
+    V03(V03SwarmEvent),
 }
 
 impl Pair {
@@ -65,10 +135,7 @@ impl Pair {
     fn with_behaviour(behaviour: Behaviour) -> Self {
         Self {
             node: build_swarm(Keypair::generate_ed25519(), behaviour),
-            v03: build_swarm(
-                Keypair::generate_ed25519(),
-                v03::Behaviour::new(v03::Config::default()),
-            ),
+            v03: build_v03_swarm(libp2p_v03::identity::Keypair::generate_ed25519()),
         }
     }
 
@@ -77,21 +144,12 @@ impl Pair {
     }
 
     fn v03_id(&self) -> PeerId {
-        *self.v03.local_peer_id()
+        from_v03_peer_id(*self.v03.local_peer_id())
     }
 
     /// Connects the node to the 0.3 node.
     async fn connect(&mut self) {
-        self.v03
-            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-            .expect("Failed to start listening");
-
-        let addr = loop {
-            if let SwarmEvent::NewListenAddr { address, .. } = self.v03.select_next_some().await {
-                break address;
-            }
-        };
-
+        let addr = listen_v03(&mut self.v03).await;
         self.node.dial(addr).expect("Failed to dial");
 
         let mut node_connected = false;
@@ -103,7 +161,7 @@ impl Pair {
                     PairEvent::Node(SwarmEvent::ConnectionEstablished { .. }) => {
                         node_connected = true;
                     }
-                    PairEvent::V03(SwarmEvent::ConnectionEstablished { .. }) => {
+                    PairEvent::V03(V03SwarmEvent::ConnectionEstablished { .. }) => {
                         v03_connected = true;
                     }
                     _ => {}
@@ -137,9 +195,11 @@ impl Pair {
             while !predicate(&node_events, &v03_events) {
                 match self.next().await {
                     PairEvent::Node(SwarmEvent::Behaviour(event)) => node_events.push(event),
-                    PairEvent::V03(SwarmEvent::Behaviour(event)) => v03_events.push(event),
-                    PairEvent::Node(SwarmEvent::ConnectionClosed { cause, .. })
-                    | PairEvent::V03(SwarmEvent::ConnectionClosed { cause, .. }) => {
+                    PairEvent::V03(V03SwarmEvent::Behaviour(event)) => v03_events.push(event),
+                    PairEvent::Node(SwarmEvent::ConnectionClosed { cause, .. }) => {
+                        panic!("Connection closed: {cause:?}");
+                    }
+                    PairEvent::V03(V03SwarmEvent::ConnectionClosed { cause, .. }) => {
                         panic!("Connection closed: {cause:?}");
                     }
                     _ => {}
@@ -163,7 +223,7 @@ impl Pair {
             node.iter().any(
                 |e| matches!(e, Event::Subscribed(p, t) if *p == v03_id && t.as_ref() == topic),
             ) && v03.iter().any(
-                |e| matches!(e, v03::Event::Subscribed(p, t) if *p == node_id && t.as_ref() == topic),
+                |e| matches!(e, v03::Event::Subscribed(p, t) if from_v03_peer_id(*p) == node_id && t.as_ref() == topic),
             )
         })
         .await;
@@ -187,7 +247,7 @@ async fn test_subscriptions_on_connect_with_v03_peer() {
         node.iter().any(
             |e| matches!(e, Event::Subscribed(p, t) if *p == v03_id && t.as_ref() == b"topic"),
         ) && v03.iter().any(
-            |e| matches!(e, v03::Event::Subscribed(p, t) if *p == node_id && t.as_ref() == b"topic"),
+            |e| matches!(e, v03::Event::Subscribed(p, t) if from_v03_peer_id(*p) == node_id && t.as_ref() == b"topic"),
         )
     })
     .await;
@@ -215,7 +275,7 @@ async fn test_broadcast_with_v03_peer() {
                 if *p == v03_id && t.as_ref() == b"topic" && m.as_ref() == b"from v03")
         }) && v03.iter().any(|e| {
             matches!(e, v03::Event::Received(p, t, m)
-                if *p == node_id && t.as_ref() == b"topic" && m.as_ref() == b"from node")
+                if from_v03_peer_id(*p) == node_id && t.as_ref() == b"topic" && m.as_ref() == b"from node")
         })
     })
     .await;
@@ -239,7 +299,7 @@ async fn test_unsubscribe_with_v03_peer() {
         node.iter().any(
             |e| matches!(e, Event::Unsubscribed(p, t) if *p == v03_id && t.as_ref() == b"topic"),
         ) && v03.iter().any(
-            |e| matches!(e, v03::Event::Unsubscribed(p, t) if *p == node_id && t.as_ref() == b"topic"),
+            |e| matches!(e, v03::Event::Unsubscribed(p, t) if from_v03_peer_id(*p) == node_id && t.as_ref() == b"topic"),
         )
     })
     .await;
@@ -349,19 +409,6 @@ async fn test_metrics_count_legacy_connections() {
 
 const UPGRADE_TOPIC: &[u8] = b"upgrade";
 
-/// Starts listening on a random local port, and returns the listen address.
-async fn listen<B: NetworkBehaviour>(swarm: &mut Swarm<B>) -> Multiaddr {
-    swarm
-        .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-        .expect("Failed to start listening");
-
-    loop {
-        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
-            return address;
-        }
-    }
-}
-
 /// The version that a node runs.
 #[derive(Clone, Copy)]
 enum Version {
@@ -372,7 +419,7 @@ enum Version {
 }
 
 enum NodeSwarm {
-    V03(Swarm<v03::Behaviour>),
+    V03(V03Swarm),
     Current(Swarm<Behaviour>),
 }
 
@@ -394,12 +441,11 @@ impl MixedNode {
 
         let (swarm, addr) = match version {
             Version::V03 => {
-                let behaviour = v03::Behaviour::new(v03::Config::default());
-                let mut swarm = build_swarm(keypair.clone(), behaviour);
+                let mut swarm = build_v03_swarm(v03_keypair(&keypair));
                 swarm
                     .behaviour_mut()
                     .subscribe(v03::Topic::new(UPGRADE_TOPIC));
-                let addr = listen(&mut swarm).await;
+                let addr = listen_v03(&mut swarm).await;
                 (NodeSwarm::V03(swarm), addr)
             }
             Version::Current { legacy_protocol } => {
@@ -437,15 +483,14 @@ impl MixedNode {
 
     fn dial(&mut self, addr: Multiaddr) {
         match &mut self.swarm {
-            NodeSwarm::V03(swarm) => swarm.dial(addr),
-            NodeSwarm::Current(swarm) => swarm.dial(addr),
+            NodeSwarm::V03(swarm) => swarm.dial(v03_addr(addr)).expect("Failed to dial"),
+            NodeSwarm::Current(swarm) => swarm.dial(addr).expect("Failed to dial"),
         }
-        .expect("Failed to dial");
     }
 
     fn is_connected(&self, peer: &PeerId) -> bool {
         match &self.swarm {
-            NodeSwarm::V03(swarm) => swarm.is_connected(peer),
+            NodeSwarm::V03(swarm) => swarm.is_connected(&v03_peer_id(*peer)),
             NodeSwarm::Current(swarm) => swarm.is_connected(peer),
         }
     }
@@ -456,7 +501,7 @@ impl MixedNode {
             NodeSwarm::V03(swarm) => swarm
                 .behaviour()
                 .peers(&v03::Topic::new(UPGRADE_TOPIC))
-                .map(|peers| peers.copied().collect())
+                .map(|peers| peers.copied().map(from_v03_peer_id).collect())
                 .unwrap_or_default(),
             NodeSwarm::Current(swarm) => {
                 swarm.behaviour().peers(Topic::new(UPGRADE_TOPIC)).collect()
@@ -482,10 +527,11 @@ impl MixedNode {
         match &mut self.swarm {
             NodeSwarm::V03(swarm) => {
                 while let Some(event) = swarm.next().now_or_never().flatten() {
-                    if let SwarmEvent::Behaviour(v03::Event::Received(peer, topic, payload)) = event
+                    if let V03SwarmEvent::Behaviour(v03::Event::Received(peer, topic, payload)) =
+                        event
                         && topic.as_ref() == UPGRADE_TOPIC
                     {
-                        received.push((peer, payload));
+                        received.push((from_v03_peer_id(peer), payload));
                     }
                 }
             }
