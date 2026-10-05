@@ -1,19 +1,21 @@
 use core::fmt;
-use std::convert::Infallible;
+use std::{io, iter};
 
 use bytes::Bytes;
 
 use asynchronous_codec::{FramedRead, FramedWrite};
-use futures::{AsyncRead, AsyncWrite, future};
+use futures::future::BoxFuture;
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt, future};
 use libp2p::core::UpgradeInfo;
 use libp2p::{InboundUpgrade, OutboundUpgrade, StreamProtocol};
 
 use crate::util::BytesRef;
-use crate::{Codec, Config};
+use crate::{Codec, Config, legacy};
 
 pub struct ProtocolConfig {
     pub protocol_name: StreamProtocol,
     pub max_message_size: usize,
+    pub legacy_protocol: bool,
 }
 
 impl From<&Config> for ProtocolConfig {
@@ -21,16 +23,21 @@ impl From<&Config> for ProtocolConfig {
         Self {
             protocol_name: config.protocol_name.clone(),
             max_message_size: config.max_message_size,
+            legacy_protocol: config.legacy_protocol,
         }
     }
 }
 
+/// Protocol names to negotiate, in order of preference.
+type ProtocolNames = iter::Chain<iter::Once<StreamProtocol>, std::option::IntoIter<StreamProtocol>>;
+
 impl UpgradeInfo for ProtocolConfig {
     type Info = StreamProtocol;
-    type InfoIter = std::iter::Once<Self::Info>;
+    type InfoIter = ProtocolNames;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        std::iter::once(self.protocol_name.clone())
+        let legacy = self.legacy_protocol.then_some(legacy::PROTOCOL_NAME);
+        iter::once(self.protocol_name.clone()).chain(legacy)
     }
 }
 
@@ -40,31 +47,91 @@ pub(crate) type FramedSubstreamRead<S> = FramedRead<S, Codec>;
 /// A framed write half of a substream.
 pub(crate) type FramedSubstreamWrite<S> = FramedWrite<S, Codec>;
 
+/// Output of an inbound substream upgrade.
+pub enum Inbound<S> {
+    /// A long-lived substream for receiving messages.
+    Stream(FramedSubstreamRead<S>),
+    /// A message received on a legacy substream.
+    Legacy(Message),
+}
+
 impl<S> InboundUpgrade<S> for ProtocolConfig
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    type Output = FramedSubstreamRead<S>;
-    type Future = future::Ready<Result<Self::Output, Self::Error>>;
-    type Error = Infallible;
+    type Output = Inbound<S>;
+    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+    type Error = io::Error;
 
-    fn upgrade_inbound(self, socket: S, _info: Self::Info) -> Self::Future {
+    fn upgrade_inbound(self, socket: S, info: Self::Info) -> Self::Future {
+        if info == legacy::PROTOCOL_NAME {
+            return legacy::read_message(socket, self.max_message_size)
+                .map(|message| message.map(Inbound::Legacy))
+                .boxed();
+        }
+
         let codec = Codec::new().with_max_size(self.max_message_size);
-        future::ok(FramedRead::new(socket, codec))
+        future::ok(Inbound::Stream(FramedRead::new(socket, codec))).boxed()
     }
 }
 
-impl<S> OutboundUpgrade<S> for ProtocolConfig
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    type Output = FramedSubstreamWrite<S>;
-    type Future = future::Ready<Result<Self::Output, Self::Error>>;
-    type Error = Infallible;
+/// Upgrade for an outbound substream.
+pub enum OutboundProtocol {
+    /// Open a long-lived substream for sending messages.
+    Stream(ProtocolConfig),
+    /// Send a single message, encoded with [`legacy::encode`], on a legacy substream.
+    Legacy(Bytes),
+}
 
-    fn upgrade_outbound(self, socket: S, _info: Self::Info) -> Self::Future {
-        let codec = Codec::new().with_max_size(self.max_message_size);
-        future::ok(FramedWrite::new(socket, codec))
+/// Output of an outbound substream upgrade.
+pub enum Outbound<S> {
+    /// A long-lived substream for sending messages.
+    Stream(FramedSubstreamWrite<S>),
+    /// The remote only supports the legacy protocol.
+    LegacyOnly,
+    /// A message was sent on a legacy substream.
+    LegacySent,
+}
+
+impl UpgradeInfo for OutboundProtocol {
+    type Info = StreamProtocol;
+    type InfoIter = ProtocolNames;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        match self {
+            Self::Stream(config) => config.protocol_info(),
+            Self::Legacy(_) => iter::once(legacy::PROTOCOL_NAME).chain(None),
+        }
+    }
+}
+
+impl<S> OutboundUpgrade<S> for OutboundProtocol
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Output = Outbound<S>;
+    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+    type Error = io::Error;
+
+    fn upgrade_outbound(self, mut socket: S, info: Self::Info) -> Self::Future {
+        match self {
+            // A legacy substream carries a single message, so close this one
+            // and send each message on its own substream with `Legacy`.
+            Self::Stream(_) if info == legacy::PROTOCOL_NAME => async move {
+                socket.close().await?;
+                Ok(Outbound::LegacyOnly)
+            }
+            .boxed(),
+            Self::Stream(config) => {
+                let codec = Codec::new().with_max_size(config.max_message_size);
+                future::ok(Outbound::Stream(FramedWrite::new(socket, codec))).boxed()
+            }
+            Self::Legacy(message) => async move {
+                legacy::write_message(socket, message).await?;
+                Ok(Outbound::LegacySent)
+            }
+            .boxed(),
+        }
     }
 }
 

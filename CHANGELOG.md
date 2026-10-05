@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+* **protocol**: Add support for peers that use libp2p-scatter 0.3 (protocol `/ax/broadcast/1.0.0`). With these peers, each message uses a new substream, and messages can arrive in a different order. The node does not send messages with a topic of more than 63 bytes to these peers.
+* **config**: Add configuration option `legacy_protocol` to turn on support for peers that use libp2p-scatter 0.3. It is off by default.
+* **metrics**: Add counter `legacy_connections`, the number of connections that fell back to the libp2p-scatter 0.3 protocol.
 
 ## v0.4.0-rc.2
 
