@@ -11,6 +11,18 @@ Implementation of a `rust-libp2p` protocol for broadcast messages to connected p
 
 Originally forked from https://github.com/cloudpeers/libp2p-broadcast.
 
+## libp2p Versions
+
+Each release line of libp2p-scatter uses one version of libp2p.
+Use the release line that matches the version of libp2p in your application.
+
+| libp2p-scatter | libp2p |
+|----------------|--------|
+| 0.4.x          | 0.56   |
+| 0.3.x          | 0.56   |
+| 0.2.x          | 0.55   |
+| 0.1.x          | 0.54   |
+
 ## API Overview
 
 ```rust
