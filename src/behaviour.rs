@@ -222,17 +222,13 @@ impl NetworkBehaviour for Behaviour {
 
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
         match event {
-            FromSwarm::ConnectionEstablished(c) => {
-                // We only care about the first time a peer connects.
-                if c.other_established == 0 {
-                    self.inject_connected(&c.peer_id);
-                }
+            // We only care about the first time a peer connects.
+            FromSwarm::ConnectionEstablished(c) if c.other_established == 0 => {
+                self.inject_connected(&c.peer_id);
             }
-            FromSwarm::ConnectionClosed(c) => {
-                // We only care about when the last connection to a peer is closed.
-                if c.remaining_established == 0 {
-                    self.inject_disconnected(&c.peer_id);
-                }
+            // We only care about when the last connection to a peer is closed.
+            FromSwarm::ConnectionClosed(c) if c.remaining_established == 0 => {
+                self.inject_disconnected(&c.peer_id);
             }
             _ => {}
         }
