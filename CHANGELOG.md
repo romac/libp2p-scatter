@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-Nothing yet.
+### Breaking Changes
+
+* **chore**: Update `libp2p` dependency to `v0.57.x`.
 
 ## v0.4.0-rc.3
 

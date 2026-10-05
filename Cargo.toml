@@ -3,6 +3,7 @@ name = "libp2p-scatter"
 version = "0.5.0-pre"
 authors = ["David Craven <david@craven.ch>", "Actyx AG", "Romain Ruetschi <github@romac.me>"]
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "libp2p protocol for broadcasting messages to connected peers"
 repository = "https://github.com/romac/libp2p-scatter"
@@ -14,7 +15,7 @@ metrics = ["dep:prometheus-client"]
 bytes = "1"
 fnv = "1"
 futures = "0.3"
-libp2p = "0.56"
+libp2p = "0.57"
 unsigned-varint = { version = "0.8", features = ["asynchronous_codec"] }
 tracing = "0.1"
 prometheus-client = { version = "0.23.1", optional = true }
@@ -23,7 +24,9 @@ asynchronous-codec = "0.7.0"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "tokio"] }
+libp2p = { version = "0.57", features = ["tcp", "noise", "yamux", "tokio"] }
 test-log = { version = "0.2.19", default-features = false, features = ["color", "trace"] }
 libp2p-scatter-v03 = { package = "libp2p-scatter", version = "=0.3.0" }
+# libp2p version that libp2p-scatter 0.3 uses
+libp2p-v056 = { package = "libp2p", version = "0.56", features = ["tcp", "noise", "yamux", "tokio"] }
 prometheus-client = "0.23.1"
