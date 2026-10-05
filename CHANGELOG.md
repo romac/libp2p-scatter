@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.4.0-rc.3
+
 ### Added
 
 * **protocol**: Add support for peers that use libp2p-scatter 0.3 (protocol `/ax/broadcast/1.0.0`). With these peers, each message uses a new substream, and messages can arrive in a different order. The node does not send messages with a topic of more than 63 bytes to these peers.
