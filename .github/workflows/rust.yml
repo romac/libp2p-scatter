@@ -2,7 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: main
+    branches:
+      - main
+      - "release/*"
   pull_request:
 
 # Cancel previous runs of this workflow when a new commit is added to the PR, branch or tag
