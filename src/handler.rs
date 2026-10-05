@@ -58,6 +58,8 @@ pub struct Handler {
     pending_events: VecDeque<HandlerEvent>,
     /// Whether we've requested an outbound substream.
     outbound_substream_requested: bool,
+    /// Whether the outbound sink holds data that has not been flushed yet.
+    outbound_needs_flush: bool,
     /// Number of legacy substreams being opened.
     legacy_substreams: usize,
     /// Whether the connection fell back to the legacy protocol.
@@ -123,6 +125,7 @@ impl Handler {
             outbound_substream_attempts: 0,
             pending_events: VecDeque::new(),
             outbound_substream_requested: false,
+            outbound_needs_flush: false,
             legacy_substreams: 0,
             legacy_fallback: false,
         }
@@ -173,6 +176,7 @@ impl Handler {
                         SendResult::Error => {
                             // Error occurred, will need new substream
                             self.outbound = OutboundState::None;
+                            self.outbound_needs_flush = false;
                             return OutboundPollResult::Continue;
                         }
                         SendResult::NothingToSend => {
@@ -227,6 +231,8 @@ impl Handler {
     }
 
     /// Try to send the next pending message on the sink.
+    ///
+    /// When there is no message to send, flush any data still buffered in the sink.
     fn try_send_message(
         &mut self,
         sink: &mut FramedSubstreamWrite<libp2p::Stream>,
@@ -234,7 +240,7 @@ impl Handler {
     ) -> SendResult {
         let message = match self.pending_messages.pop_front() {
             Some(msg) => msg,
-            None => return SendResult::NothingToSend,
+            None => return self.flush_outbound(sink, cx),
         };
 
         trace!(?message, "Sending message on outbound substream");
@@ -260,6 +266,7 @@ impl Handler {
         match Pin::new(&mut *sink).poll_flush(cx) {
             Poll::Ready(Ok(())) => {
                 trace!("Message sent successfully on outbound substream");
+                self.outbound_needs_flush = false;
                 SendResult::Sent
             }
             Poll::Ready(Err(e)) => {
@@ -267,9 +274,35 @@ impl Handler {
                 SendResult::Error
             }
             Poll::Pending => {
-                // Flush is pending but message was accepted
+                // Flush is pending but message was accepted,
+                // keep flushing on later polls until it completes
+                self.outbound_needs_flush = true;
                 SendResult::Sent
             }
+        }
+    }
+
+    /// Flush data still buffered in the sink, if any.
+    fn flush_outbound(
+        &mut self,
+        sink: &mut FramedSubstreamWrite<libp2p::Stream>,
+        cx: &mut Context<'_>,
+    ) -> SendResult {
+        if !self.outbound_needs_flush {
+            return SendResult::NothingToSend;
+        }
+
+        match Pin::new(&mut *sink).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                trace!("Flushed outbound substream");
+                self.outbound_needs_flush = false;
+                SendResult::NothingToSend
+            }
+            Poll::Ready(Err(e)) => {
+                debug!("Error flushing on outbound substream: {}", e);
+                SendResult::Error
+            }
+            Poll::Pending => SendResult::NothingToSend,
         }
     }
 

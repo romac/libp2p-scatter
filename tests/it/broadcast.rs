@@ -1,7 +1,12 @@
 //! Tests for message broadcasting functionality.
 
+use std::time::Duration;
+
 use bytes::Bytes;
+use futures::{FutureExt, StreamExt};
+use libp2p::swarm::SwarmEvent;
 use libp2p_scatter::{Event, Topic};
+use tokio::time::timeout;
 use tracing::info;
 
 use crate::common::TestNetwork;
@@ -182,4 +187,58 @@ async fn test_multiple_broadcasts_in_sequence() {
     for msg in &messages {
         assert!(received.contains(msg), "Missing message: {:?}", msg);
     }
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_burst_is_fully_delivered() {
+    const MESSAGE_COUNT: usize = 5000;
+    const MAX_IN_FLIGHT: usize = 256;
+
+    let mut network = TestNetwork::fully_connected(2).await;
+
+    let topic = Topic::new(b"burst-topic");
+    let peer_1 = network.peer_id(1);
+
+    // Node 1 subscribes
+    network.node_mut(1).behaviour_mut().subscribe(topic);
+
+    // Wait for node 0 to see node 1's subscription
+    network
+        .wait_for_event_on(0, |e| matches!(e, Event::Subscribed(p, _) if *p == peer_1))
+        .await;
+
+    // Node 0 broadcasts a burst of 1 KiB messages, keeping the number of
+    // messages in flight below the outbound queue limit
+    let payload = Bytes::from(vec![0xAB; 1024]);
+    let mut sent = 0;
+    let mut received = 0;
+
+    let result = timeout(Duration::from_secs(5), async {
+        while received < MESSAGE_COUNT {
+            while sent < MESSAGE_COUNT && sent - received < MAX_IN_FLIGHT {
+                network
+                    .node_mut(0)
+                    .behaviour_mut()
+                    .broadcast(topic, payload.clone());
+                sent += 1;
+            }
+
+            for (idx, node) in network.nodes_mut().enumerate() {
+                while let Some(event) = node.swarm_mut().next().now_or_never().flatten() {
+                    if idx == 1 && matches!(event, SwarmEvent::Behaviour(Event::Received(..))) {
+                        received += 1;
+                    }
+                }
+            }
+
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Received {received} of {MESSAGE_COUNT} messages ({sent} sent)"
+    );
 }

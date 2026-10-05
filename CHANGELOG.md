@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+* **handler**: Flush the outbound substream after the queue is empty. Before, the last messages of a burst could stay in the write buffer until the node sent another message.
 
 ## v0.4.0-rc.3
 
