@@ -4,17 +4,34 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
+use libp2p::identity::Keypair;
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{PeerId, SwarmBuilder, noise, tcp, yamux};
+use libp2p::{Multiaddr, PeerId, SwarmBuilder, noise, tcp, yamux};
+#[cfg(feature = "metrics")]
+use libp2p_scatter::metrics::Registry;
 use libp2p_scatter::{Behaviour, Config, Event, Topic};
 use libp2p_scatter_v03 as v03;
 use tokio::time::timeout;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-fn build_swarm<B: NetworkBehaviour>(behaviour: B) -> Swarm<B> {
-    SwarmBuilder::with_new_identity()
+/// Returns the value of the `legacy_connections` metric.
+#[cfg(feature = "metrics")]
+fn legacy_connections(registry: &Registry) -> u64 {
+    let mut text = String::new();
+    prometheus_client::encoding::text::encode(&mut text, registry)
+        .expect("Failed to encode metrics");
+
+    text.lines()
+        .find_map(|line| line.strip_prefix("legacy_connections_total "))
+        .expect("Metric legacy_connections not found")
+        .parse()
+        .expect("Invalid value for metric legacy_connections")
+}
+
+fn build_swarm<B: NetworkBehaviour>(keypair: Keypair, behaviour: B) -> Swarm<B> {
+    SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -42,9 +59,16 @@ enum PairEvent {
 
 impl Pair {
     fn new(config: Config) -> Self {
+        Self::with_behaviour(Behaviour::new(config))
+    }
+
+    fn with_behaviour(behaviour: Behaviour) -> Self {
         Self {
-            node: build_swarm(Behaviour::new(config)),
-            v03: build_swarm(v03::Behaviour::new(v03::Config::default())),
+            node: build_swarm(Keypair::generate_ed25519(), behaviour),
+            v03: build_swarm(
+                Keypair::generate_ed25519(),
+                v03::Behaviour::new(v03::Config::default()),
+            ),
         }
     }
 
@@ -302,4 +326,368 @@ async fn test_v03_peer_disconnects_by_default() {
     })
     .await
     .expect("Timeout waiting for connection to close");
+}
+
+#[cfg(feature = "metrics")]
+#[tokio::test]
+#[test_log::test]
+async fn test_metrics_count_legacy_connections() {
+    let mut registry = Registry::default();
+    let config = Config::default().legacy_protocol(true);
+    let mut pair = Pair::with_behaviour(Behaviour::new_with_metrics(config, &mut registry));
+
+    // The connection falls back only when a message is sent
+    pair.connect().await;
+    assert_eq!(legacy_connections(&registry), 0);
+
+    // Messages in both directions use the legacy protocol on the same connection
+    pair.subscribe_both(b"topic").await;
+    assert_eq!(legacy_connections(&registry), 1);
+}
+
+// ==================== Rolling Upgrade ====================
+
+const UPGRADE_TOPIC: &[u8] = b"upgrade";
+
+/// Starts listening on a random local port, and returns the listen address.
+async fn listen<B: NetworkBehaviour>(swarm: &mut Swarm<B>) -> Multiaddr {
+    swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .expect("Failed to start listening");
+
+    loop {
+        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+            return address;
+        }
+    }
+}
+
+/// The version that a node runs.
+#[derive(Clone, Copy)]
+enum Version {
+    /// libp2p-scatter 0.3.
+    V03,
+    /// The current version, with the given `Config::legacy_protocol`.
+    Current { legacy_protocol: bool },
+}
+
+enum NodeSwarm {
+    V03(Swarm<v03::Behaviour>),
+    Current(Swarm<Behaviour>),
+}
+
+/// A node that runs libp2p-scatter 0.3 or the current version,
+/// and is subscribed to [`UPGRADE_TOPIC`].
+struct MixedNode {
+    keypair: Keypair,
+    swarm: NodeSwarm,
+    addr: Multiaddr,
+    /// Metrics of the node. Only nodes that run the current version have metrics.
+    #[cfg(feature = "metrics")]
+    registry: Registry,
+}
+
+impl MixedNode {
+    async fn start(keypair: Keypair, version: Version) -> Self {
+        #[cfg(feature = "metrics")]
+        let mut registry = Registry::default();
+
+        let (swarm, addr) = match version {
+            Version::V03 => {
+                let behaviour = v03::Behaviour::new(v03::Config::default());
+                let mut swarm = build_swarm(keypair.clone(), behaviour);
+                swarm
+                    .behaviour_mut()
+                    .subscribe(v03::Topic::new(UPGRADE_TOPIC));
+                let addr = listen(&mut swarm).await;
+                (NodeSwarm::V03(swarm), addr)
+            }
+            Version::Current { legacy_protocol } => {
+                let config = Config::default().legacy_protocol(legacy_protocol);
+                #[cfg(feature = "metrics")]
+                let behaviour = Behaviour::new_with_metrics(config, &mut registry);
+                #[cfg(not(feature = "metrics"))]
+                let behaviour = Behaviour::new(config);
+
+                let mut swarm = build_swarm(keypair.clone(), behaviour);
+                swarm.behaviour_mut().subscribe(Topic::new(UPGRADE_TOPIC));
+                let addr = listen(&mut swarm).await;
+                (NodeSwarm::Current(swarm), addr)
+            }
+        };
+
+        Self {
+            keypair,
+            swarm,
+            addr,
+            #[cfg(feature = "metrics")]
+            registry,
+        }
+    }
+
+    /// Returns the value of the `legacy_connections` metric.
+    #[cfg(feature = "metrics")]
+    fn legacy_connections(&self) -> u64 {
+        legacy_connections(&self.registry)
+    }
+
+    fn peer_id(&self) -> PeerId {
+        self.keypair.public().to_peer_id()
+    }
+
+    fn dial(&mut self, addr: Multiaddr) {
+        match &mut self.swarm {
+            NodeSwarm::V03(swarm) => swarm.dial(addr),
+            NodeSwarm::Current(swarm) => swarm.dial(addr),
+        }
+        .expect("Failed to dial");
+    }
+
+    fn is_connected(&self, peer: &PeerId) -> bool {
+        match &self.swarm {
+            NodeSwarm::V03(swarm) => swarm.is_connected(peer),
+            NodeSwarm::Current(swarm) => swarm.is_connected(peer),
+        }
+    }
+
+    /// Returns the peers that this node knows are subscribed to the topic.
+    fn subscribers(&self) -> HashSet<PeerId> {
+        match &self.swarm {
+            NodeSwarm::V03(swarm) => swarm
+                .behaviour()
+                .peers(&v03::Topic::new(UPGRADE_TOPIC))
+                .map(|peers| peers.copied().collect())
+                .unwrap_or_default(),
+            NodeSwarm::Current(swarm) => {
+                swarm.behaviour().peers(Topic::new(UPGRADE_TOPIC)).collect()
+            }
+        }
+    }
+
+    fn broadcast(&mut self, payload: Bytes) {
+        match &mut self.swarm {
+            NodeSwarm::V03(swarm) => swarm
+                .behaviour_mut()
+                .broadcast(&v03::Topic::new(UPGRADE_TOPIC), payload),
+            NodeSwarm::Current(swarm) => swarm
+                .behaviour_mut()
+                .broadcast(Topic::new(UPGRADE_TOPIC), payload),
+        }
+    }
+
+    /// Processes the pending swarm events, and returns the messages received on the topic.
+    fn drain_events(&mut self) -> Vec<(PeerId, Bytes)> {
+        let mut received = Vec::new();
+
+        match &mut self.swarm {
+            NodeSwarm::V03(swarm) => {
+                while let Some(event) = swarm.next().now_or_never().flatten() {
+                    if let SwarmEvent::Behaviour(v03::Event::Received(peer, topic, payload)) = event
+                        && topic.as_ref() == UPGRADE_TOPIC
+                    {
+                        received.push((peer, payload));
+                    }
+                }
+            }
+            NodeSwarm::Current(swarm) => {
+                while let Some(event) = swarm.next().now_or_never().flatten() {
+                    if let SwarmEvent::Behaviour(Event::Received(peer, topic, payload)) = event
+                        && topic.as_ref() == UPGRADE_TOPIC
+                    {
+                        received.push((peer, payload));
+                    }
+                }
+            }
+        }
+
+        received
+    }
+}
+
+/// A fully connected network of nodes that run libp2p-scatter 0.3 or the current version.
+struct MixedNetwork {
+    nodes: Vec<MixedNode>,
+}
+
+impl MixedNetwork {
+    /// Starts a fully connected network of nodes that run the given version.
+    async fn start(count: usize, version: Version) -> Self {
+        let mut nodes = Vec::with_capacity(count);
+        for _ in 0..count {
+            nodes.push(MixedNode::start(Keypair::generate_ed25519(), version).await);
+        }
+
+        for i in 0..count {
+            for j in i + 1..count {
+                let addr = nodes[j].addr.clone();
+                nodes[i].dial(addr);
+            }
+        }
+
+        let mut network = Self { nodes };
+        network.wait_until_meshed().await;
+        network
+    }
+
+    /// Restarts the node at `index` with the given version and the same identity,
+    /// then reconnects it to the other nodes.
+    async fn restart(&mut self, index: usize, version: Version) {
+        let peer_id = self.nodes[index].peer_id();
+        let keypair = self.nodes.remove(index).keypair;
+
+        // Wait until the other nodes see that the old node is gone, so that
+        // they send their subscriptions again when the new node connects.
+        self.drive_until(|nodes, _| nodes.iter().all(|node| !node.is_connected(&peer_id)))
+            .await;
+
+        let mut node = MixedNode::start(keypair, version).await;
+        for other in &self.nodes {
+            node.dial(other.addr.clone());
+        }
+        self.nodes.insert(index, node);
+
+        self.wait_until_meshed().await;
+    }
+
+    /// Checks that no connection fell back to the legacy protocol.
+    #[cfg(feature = "metrics")]
+    fn assert_no_legacy_connections(&self) {
+        for (i, node) in self.nodes.iter().enumerate() {
+            assert_eq!(
+                node.legacy_connections(),
+                0,
+                "node {i} has connections that fell back to the legacy protocol"
+            );
+        }
+    }
+
+    /// Waits until each node is connected to all other nodes,
+    /// and knows that they are subscribed to the topic.
+    async fn wait_until_meshed(&mut self) {
+        let peer_ids: HashSet<PeerId> = self.nodes.iter().map(MixedNode::peer_id).collect();
+
+        self.drive_until(|nodes, _| {
+            nodes.iter().all(|node| {
+                let mut others = peer_ids.clone();
+                others.remove(&node.peer_id());
+                others.iter().all(|peer| node.is_connected(peer)) && node.subscribers() == others
+            })
+        })
+        .await;
+    }
+
+    /// Makes each node broadcast a message, and checks that all other nodes receive it.
+    async fn assert_broadcasts_reach_all_nodes(&mut self, round: usize) {
+        let payload = |i: usize| Bytes::from(format!("round {round} from node {i}"));
+        let peer_ids: Vec<PeerId> = self.nodes.iter().map(MixedNode::peer_id).collect();
+
+        for (i, node) in self.nodes.iter_mut().enumerate() {
+            node.broadcast(payload(i));
+        }
+
+        let expected: Vec<HashSet<(PeerId, Bytes)>> = (0..peer_ids.len())
+            .map(|i| {
+                (0..peer_ids.len())
+                    .filter(|&j| j != i)
+                    .map(|j| (peer_ids[j], payload(j)))
+                    .collect()
+            })
+            .collect();
+
+        let received = self
+            .drive_until(|_, received| {
+                received
+                    .iter()
+                    .zip(&expected)
+                    .all(|(received, expected)| received.len() >= expected.len())
+            })
+            .await;
+
+        for (i, (received, expected)) in received.into_iter().zip(&expected).enumerate() {
+            assert_eq!(
+                received.len(),
+                expected.len(),
+                "node {i} received unexpected messages in round {round}"
+            );
+            assert_eq!(
+                &received.into_iter().collect::<HashSet<_>>(),
+                expected,
+                "node {i} received the wrong messages in round {round}"
+            );
+        }
+    }
+
+    /// Drives all nodes until the predicate returns true,
+    /// and returns the messages that each node received.
+    async fn drive_until<F>(&mut self, mut done: F) -> Vec<Vec<(PeerId, Bytes)>>
+    where
+        F: FnMut(&[MixedNode], &[Vec<(PeerId, Bytes)>]) -> bool,
+    {
+        let mut received = vec![Vec::new(); self.nodes.len()];
+
+        timeout(TIMEOUT, async {
+            while !done(&self.nodes, &received) {
+                for (node, received) in self.nodes.iter_mut().zip(&mut received) {
+                    received.extend(node.drain_events());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timeout waiting for the network");
+
+        received
+    }
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_rolling_upgrade_from_v03() {
+    const NODES: usize = 4;
+
+    let mut network = MixedNetwork::start(NODES, Version::V03).await;
+    network.assert_broadcasts_reach_all_nodes(0).await;
+
+    // Until the last upgrade, the network has nodes on both versions.
+    for index in 0..NODES {
+        let version = Version::Current {
+            legacy_protocol: true,
+        };
+        network.restart(index, version).await;
+        network.assert_broadcasts_reach_all_nodes(index + 1).await;
+
+        // The upgraded node falls back to the legacy protocol
+        // on its connection to each node that still runs 0.3.
+        #[cfg(feature = "metrics")]
+        assert_eq!(
+            network.nodes[index].legacy_connections(),
+            (NODES - 1 - index) as u64
+        );
+    }
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_rolling_upgrade_turns_off_legacy_protocol() {
+    const NODES: usize = 4;
+
+    // All nodes run the current version, and still support the legacy protocol.
+    let version = Version::Current {
+        legacy_protocol: true,
+    };
+    let mut network = MixedNetwork::start(NODES, version).await;
+    network.assert_broadcasts_reach_all_nodes(0).await;
+
+    // Until the last restart, the network has nodes with and without
+    // legacy support. No connection falls back to the legacy protocol.
+    for index in 0..NODES {
+        let version = Version::Current {
+            legacy_protocol: false,
+        };
+        network.restart(index, version).await;
+        network.assert_broadcasts_reach_all_nodes(index + 1).await;
+
+        #[cfg(feature = "metrics")]
+        network.assert_no_legacy_connections();
+    }
 }
