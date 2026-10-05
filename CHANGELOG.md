@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.4.0-rc.4
+
 ### Changed
 
 * **codec**: Encode each message directly into the write buffer. Each payload is now copied once instead of twice, and the space for the message is reserved once.
