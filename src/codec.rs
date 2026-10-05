@@ -9,8 +9,8 @@ use crate::protocol::{Message, Topic};
 /// Wire format codec for protocol messages.
 ///
 /// This type handles encoding and decoding of [`Message`] values to/from the
-/// wire format. The codec is separate from the message type to allow for
-/// zero-allocation encoding via the [`encode`](Self::encode) method.
+/// wire format. The [`encode`](Self::encode) method writes each message
+/// directly into the destination buffer, without a temporary buffer.
 ///
 /// # Wire Format
 ///
@@ -111,26 +111,40 @@ impl Codec {
     /// # Errors
     /// Returns an error if encoding fails.
     pub fn encode_msg(&mut self, message: Message, dst: &mut BytesMut) -> io::Result<()> {
-        let mut buf = BytesMut::new();
-        match message {
-            Message::Subscribe(topic) => {
-                buf.put_u8(Self::TAG_SUBSCRIBE);
-                buf.put_u8(topic.len() as u8);
-                buf.put_slice(topic.as_ref());
-            }
-            Message::Unsubscribe(topic) => {
-                buf.put_u8(Self::TAG_UNSUBSCRIBE);
-                buf.put_u8(topic.len() as u8);
-                buf.put_slice(topic.as_ref());
-            }
-            Message::Broadcast(topic, payload) => {
-                buf.put_u8(Self::TAG_BROADCAST);
-                buf.put_u8(topic.len() as u8);
-                buf.put_slice(topic.as_ref());
-                self.unsigned_varint.encode(payload, &mut buf)?;
-            }
+        let (tag, topic, payload) = match message {
+            Message::Subscribe(topic) => (Self::TAG_SUBSCRIBE, topic, None),
+            Message::Unsubscribe(topic) => (Self::TAG_UNSUBSCRIBE, topic, None),
+            Message::Broadcast(topic, payload) => (Self::TAG_BROADCAST, topic, Some(payload)),
+        };
+
+        let mut payload_len_buf = unsigned_varint::encode::usize_buffer();
+        let payload_len: &[u8] = match &payload {
+            Some(payload) => unsigned_varint::encode::usize(payload.len(), &mut payload_len_buf),
+            None => &[],
+        };
+        let payload: &[u8] = payload.as_deref().unwrap_or_default();
+
+        // The frame length is never smaller than the payload length,
+        // so this check also bounds the payload.
+        let frame_len = 2 + topic.len() + payload_len.len() + payload.len();
+        if frame_len > self.unsigned_varint.max_len() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "len > max when encoding",
+            ));
         }
-        self.unsigned_varint.encode(buf.freeze(), dst)
+
+        let mut frame_len_buf = unsigned_varint::encode::usize_buffer();
+        let frame_len_prefix = unsigned_varint::encode::usize(frame_len, &mut frame_len_buf);
+
+        dst.reserve(frame_len_prefix.len() + frame_len);
+        dst.put_slice(frame_len_prefix);
+        dst.put_u8(tag);
+        dst.put_u8(topic.len() as u8);
+        dst.put_slice(topic.as_ref());
+        dst.put_slice(payload_len);
+        dst.put_slice(payload);
+        Ok(())
     }
 }
 
@@ -293,6 +307,84 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_encode_wire_format() {
+        let mut codec = Codec::new();
+        let topic = Topic::new(b"ab");
+
+        let mut buf = BytesMut::new();
+        codec.encode(Message::Subscribe(topic), &mut buf).unwrap();
+        assert_eq!(&buf[..], &[4, 0x00, 2, b'a', b'b']);
+
+        let mut buf = BytesMut::new();
+        codec.encode(Message::Unsubscribe(topic), &mut buf).unwrap();
+        assert_eq!(&buf[..], &[4, 0x02, 2, b'a', b'b']);
+
+        let mut buf = BytesMut::new();
+        let payload = Bytes::from_static(b"xyz");
+        codec
+            .encode(Message::Broadcast(topic, payload), &mut buf)
+            .unwrap();
+        assert_eq!(&buf[..], &[8, 0x01, 2, b'a', b'b', 3, b'x', b'y', b'z']);
+    }
+
+    #[test]
+    fn test_encode_rejects_frame_over_max_size() {
+        let topic = Topic::new(b"test");
+        // Frame: tag + topic_len + 4 topic bytes + 1 varint byte + 4 payload bytes = 11
+        let msg = Message::Broadcast(topic, Bytes::from_static(b"data"));
+
+        let mut buf = BytesMut::from(&b"existing"[..]);
+        let err = Codec::new()
+            .with_max_size(10)
+            .encode(msg.clone(), &mut buf)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(err.to_string(), "len > max when encoding");
+        assert_eq!(&buf[..], b"existing");
+
+        Codec::new()
+            .with_max_size(11)
+            .encode(msg, &mut buf)
+            .unwrap();
+        assert_eq!(buf.len(), b"existing".len() + 12);
+    }
+
+    #[test]
+    fn test_encode_varint_boundaries() {
+        let mut codec = Codec::new();
+        let topic = Topic::new(b"ab");
+
+        // (payload length, frame length prefix, payload length prefix)
+        let cases: &[(usize, &[u8], &[u8])] = &[
+            (0, &[0x05], &[0x00]),
+            (122, &[0x7f], &[0x7a]),
+            (123, &[0x80, 0x01], &[0x7b]),
+            (127, &[0x84, 0x01], &[0x7f]),
+            (128, &[0x86, 0x01], &[0x80, 0x01]),
+            (16377, &[0xff, 0x7f], &[0xf9, 0x7f]),
+            (16378, &[0x80, 0x80, 0x01], &[0xfa, 0x7f]),
+            (16383, &[0x85, 0x80, 0x01], &[0xff, 0x7f]),
+            (16384, &[0x87, 0x80, 0x01], &[0x80, 0x80, 0x01]),
+        ];
+
+        for &(payload_len, frame_prefix, payload_prefix) in cases {
+            let payload = Bytes::from(vec![0xaa; payload_len]);
+            let msg = Message::Broadcast(topic, payload.clone());
+
+            let mut expected = Vec::new();
+            expected.extend_from_slice(frame_prefix);
+            expected.extend_from_slice(&[0x01, 2, b'a', b'b']);
+            expected.extend_from_slice(payload_prefix);
+            expected.extend_from_slice(&payload);
+
+            let mut buf = BytesMut::new();
+            codec.encode(msg.clone(), &mut buf).unwrap();
+            assert_eq!(&buf[..], &expected[..], "payload length {payload_len}");
+            assert_eq!(codec.decode(&mut buf).unwrap(), Some(msg));
+        }
     }
 
     #[test]

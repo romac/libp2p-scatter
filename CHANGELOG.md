@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+* **codec**: Encode each message directly into the write buffer. Each payload is now copied once instead of twice, and the space for the message is reserved once.
+
 ### Fixed
 
 * **handler**: Flush the outbound substream after the queue is empty. Before, the last messages of a burst could stay in the write buffer until the node sent another message.
