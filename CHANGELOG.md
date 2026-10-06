@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.4.0-rc.5
+
 ### Added
 
 * **behaviour**: Add `Behaviour::announce` to send a subscription to a connected peer again. A node sends its subscriptions only when the first connection to a peer opens, and `subscribe` does nothing for a topic that the node is already subscribed to.
