@@ -126,6 +126,11 @@ impl Metrics {
         self.topic_peers_count.get_or_create(topic).inc();
     }
 
+    #[cfg(test)]
+    pub(crate) fn topic_peers(&mut self, topic: &Topic) -> i64 {
+        self.topic_peers_count.get_or_create(topic).get()
+    }
+
     /// Decrease the number of peers that are subscribed to this topic.
     pub(crate) fn dec_topic_peers(&mut self, topic: &Topic) {
         self.register_topic(topic);

@@ -247,3 +247,34 @@ async fn test_local_subscriptions_persist_through_disconnect() {
         "Local subscription should persist after disconnect"
     );
 }
+
+#[tokio::test]
+#[test_log::test]
+async fn test_announce_resends_subscription_to_connected_peer() {
+    let mut network = TestNetwork::fully_connected(2).await;
+
+    let topic = Topic::new(b"test-topic");
+    let peer_0 = network.peer_id(0);
+    let peer_1 = network.peer_id(1);
+
+    network.node_mut(1).behaviour_mut().subscribe(topic);
+
+    network
+        .wait_for_event_on(
+            0,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic),
+        )
+        .await;
+
+    assert!(network.node_mut(1).behaviour_mut().announce(&peer_0, topic));
+
+    network
+        .wait_for_event_on(
+            0,
+            |e| matches!(e, Event::Subscribed(p, t) if *p == peer_1 && *t == topic),
+        )
+        .await;
+
+    let peers: Vec<_> = network.node(0).behaviour().peers(topic).collect();
+    assert_eq!(peers, vec![peer_1]);
+}

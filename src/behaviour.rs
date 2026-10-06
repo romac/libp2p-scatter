@@ -114,6 +114,27 @@ impl Behaviour {
         true
     }
 
+    /// Send our subscription to `topic` to `peer` again.
+    ///
+    /// A peer learns our subscriptions when its first connection to us opens.
+    /// Use this method to send a subscription again, for example when that
+    /// connection closes and another connection to the peer stays open.
+    ///
+    /// Returns `false` if we are not subscribed to `topic` or `peer` is not connected.
+    pub fn announce(&mut self, peer: &PeerId, topic: Topic) -> bool {
+        if !self.subscribed_topics.contains(&topic) || !self.connected_peers.contains_key(peer) {
+            return false;
+        }
+
+        self.events.push_back(ToSwarm::NotifyHandler {
+            peer_id: *peer,
+            handler: NotifyHandler::Any,
+            event: Message::Subscribe(topic),
+        });
+
+        true
+    }
+
     /// Unsubscribe from a topic.
     pub fn unsubscribe(&mut self, topic: Topic) -> bool {
         if !self.subscribed_topics.remove(&topic) {
@@ -245,12 +266,14 @@ impl NetworkBehaviour for Behaviour {
 
         match event {
             HandlerEvent::Received(Subscribe(topic)) => {
-                #[cfg(feature = "metrics")]
-                if let Some(metrics) = self.metrics.as_mut() {
-                    metrics.inc_topic_peers(&topic);
+                // A peer can send the same subscription again, see `announce`.
+                if self.connected_peers.entry(peer).or_default().insert(topic) {
+                    #[cfg(feature = "metrics")]
+                    if let Some(metrics) = self.metrics.as_mut() {
+                        metrics.inc_topic_peers(&topic);
+                    }
                 }
 
-                self.connected_peers.entry(peer).or_default().insert(topic);
                 self.topic_subscribers
                     .entry(topic)
                     .or_default()
@@ -640,6 +663,84 @@ mod tests {
 
         // B should not receive unsubscribe (because A was not subscribed)
         assert!(b.next().is_none());
+    }
+
+    #[test]
+    fn test_announce_resends_subscription() {
+        let topic = Topic::new(b"topic");
+
+        let mut a = DummySwarm::new();
+        let mut b = DummySwarm::new();
+        let mut c = DummySwarm::new();
+
+        a.subscribe(topic);
+        a.dial(&mut b);
+        a.dial(&mut c);
+        assert!(a.next().is_none());
+        assert_eq!(b.next().unwrap(), Event::Subscribed(*a.peer_id(), topic));
+        assert_eq!(c.next().unwrap(), Event::Subscribed(*a.peer_id(), topic));
+
+        assert!(a.behaviour.lock().unwrap().announce(b.peer_id(), topic));
+        assert!(a.next().is_none());
+
+        // Only B receives the subscription again
+        assert_eq!(b.next().unwrap(), Event::Subscribed(*a.peer_id(), topic));
+        assert!(c.next().is_none());
+        assert_eq!(
+            b.behaviour.lock().unwrap().peers(topic).collect::<Vec<_>>(),
+            vec![*a.peer_id()]
+        );
+    }
+
+    #[test]
+    fn test_announce_not_subscribed() {
+        let topic = Topic::new(b"topic");
+
+        let mut a = DummySwarm::new();
+        let mut b = DummySwarm::new();
+
+        a.dial(&mut b);
+
+        assert!(!a.behaviour.lock().unwrap().announce(b.peer_id(), topic));
+        assert!(a.next().is_none());
+        assert!(b.next().is_none());
+    }
+
+    #[test]
+    fn test_announce_not_connected() {
+        let topic = Topic::new(b"topic");
+
+        let a = DummySwarm::new();
+        let b = DummySwarm::new();
+
+        a.subscribe(topic);
+
+        assert!(!a.behaviour.lock().unwrap().announce(b.peer_id(), topic));
+        assert!(a.next().is_none());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_repeated_subscription_counts_peer_once() {
+        use crate::handler::HandlerEvent;
+
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut registry = Registry::default();
+        let mut behaviour = Behaviour::new_with_metrics(Config::default(), &mut registry);
+        behaviour.inject_connected(&peer);
+
+        for _ in 0..2 {
+            behaviour.on_connection_handler_event(
+                peer,
+                ConnectionId::new_unchecked(0),
+                HandlerEvent::Received(Message::Subscribe(topic)),
+            );
+        }
+
+        let metrics = behaviour.metrics.as_mut().unwrap();
+        assert_eq!(metrics.topic_peers(&topic), 1);
     }
 
     // ==================== Connection Lifecycle Tests ====================
