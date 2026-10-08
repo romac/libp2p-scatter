@@ -40,6 +40,10 @@ pub enum HandlerEvent {
     /// The connection fell back to the legacy protocol.
     /// Sent at most once per connection.
     LegacyFallback,
+    /// Outbound messages may have been lost, but the handler can still send.
+    OutboundFailed,
+    /// The handler stopped sending messages on this connection.
+    OutboundClosed,
 }
 
 /// The connection handler for the scatter protocol.
@@ -52,7 +56,7 @@ pub struct Handler {
     outbound: OutboundState,
     /// Queue of messages waiting to be sent.
     pending_messages: VecDeque<Message>,
-    /// Number of failed attempts to open an outbound substream.
+    /// Number of outbound failures in a row: failed substream upgrades and failed sends.
     outbound_substream_attempts: usize,
     /// Events to emit to the behaviour.
     pending_events: VecDeque<HandlerEvent>,
@@ -174,10 +178,10 @@ impl Handler {
                             return OutboundPollResult::Continue;
                         }
                         SendResult::Error => {
-                            // Error occurred, will need new substream
+                            // Error occurred, request a new substream for the remaining messages
                             self.outbound = OutboundState::None;
                             self.outbound_needs_flush = false;
-                            return OutboundPollResult::Continue;
+                            self.on_outbound_failure(true);
                         }
                         SendResult::NothingToSend => {
                             self.outbound = OutboundState::Ready(sink);
@@ -267,6 +271,7 @@ impl Handler {
             Poll::Ready(Ok(())) => {
                 trace!("Message sent successfully on outbound substream");
                 self.outbound_needs_flush = false;
+                self.outbound_substream_attempts = 0;
                 SendResult::Sent
             }
             Poll::Ready(Err(e)) => {
@@ -296,6 +301,7 @@ impl Handler {
             Poll::Ready(Ok(())) => {
                 trace!("Flushed outbound substream");
                 self.outbound_needs_flush = false;
+                self.outbound_substream_attempts = 0;
                 SendResult::NothingToSend
             }
             Poll::Ready(Err(e)) => {
@@ -303,6 +309,33 @@ impl Handler {
                 SendResult::Error
             }
             Poll::Pending => SendResult::NothingToSend,
+        }
+    }
+
+    /// Record an outbound failure and give up after too many failures in a row.
+    /// Otherwise, notify the behaviour if messages may have been lost.
+    fn on_outbound_failure(&mut self, messages_lost: bool) {
+        self.outbound_substream_attempts += 1;
+
+        if self.outbound_substream_attempts < MAX_SUBSTREAM_ATTEMPTS {
+            if messages_lost {
+                self.pending_events.push_back(HandlerEvent::OutboundFailed);
+            }
+            return;
+        }
+
+        if !matches!(self.outbound, OutboundState::Closed) {
+            warn!(
+                "Outbound substream failed {} times in a row, giving up",
+                MAX_SUBSTREAM_ATTEMPTS
+            );
+
+            self.outbound = OutboundState::Closed;
+
+            // Clear pending messages since we can't send them
+            self.pending_messages.clear();
+
+            self.pending_events.push_back(HandlerEvent::OutboundClosed);
         }
     }
 
@@ -359,6 +392,20 @@ impl ConnectionHandler for Handler {
             return;
         }
 
+        // Subscription messages carry state, so they are not dropped when the queue is full.
+        // Keep only the latest one for each topic, which bounds them by the number of topics.
+        if let Message::Subscribe(topic) | Message::Unsubscribe(topic) = message {
+            let pending = self.pending_messages.iter_mut().find(|pending| {
+                matches!(pending, Message::Subscribe(t) | Message::Unsubscribe(t) if *t == topic)
+            });
+
+            match pending {
+                Some(pending) => *pending = message,
+                None => self.pending_messages.push_back(message),
+            }
+            return;
+        }
+
         // Drop messages if queue is full
         if self.pending_messages.len() >= self.config.max_outbound_queue_size {
             warn!("Dropping message: queue full");
@@ -405,9 +452,6 @@ impl ConnectionHandler for Handler {
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
                 protocol, ..
             }) => {
-                // Reset the attempt counter on success
-                self.outbound_substream_attempts = 0;
-
                 match protocol {
                     Outbound::Stream(stream) => {
                         // Create a framed writer for the outbound substream
@@ -424,17 +468,23 @@ impl ConnectionHandler for Handler {
                     Outbound::LegacySent => {
                         trace!("Message sent on legacy substream");
                         self.legacy_substreams -= 1;
+                        self.outbound_substream_attempts = 0;
                     }
                 }
             }
 
             ConnectionEvent::DialUpgradeError(DialUpgradeError { error, .. }) => {
-                match self.outbound {
+                let messages_lost = match self.outbound {
                     // The message sent on this legacy substream is lost.
-                    OutboundState::Legacy => self.legacy_substreams -= 1,
-                    _ => self.outbound_substream_requested = false,
-                }
-                self.outbound_substream_attempts += 1;
+                    OutboundState::Legacy => {
+                        self.legacy_substreams -= 1;
+                        true
+                    }
+                    _ => {
+                        self.outbound_substream_requested = false;
+                        false
+                    }
+                };
 
                 match error {
                     StreamUpgradeError::Timeout => {
@@ -451,19 +501,7 @@ impl ConnectionHandler for Handler {
                     }
                 }
 
-                if self.outbound_substream_attempts >= MAX_SUBSTREAM_ATTEMPTS
-                    && !matches!(self.outbound, OutboundState::Closed)
-                {
-                    warn!(
-                        "Failed to open outbound substream after {} attempts, giving up",
-                        MAX_SUBSTREAM_ATTEMPTS
-                    );
-
-                    self.outbound = OutboundState::Closed;
-
-                    // Clear pending messages since we can't send them
-                    self.pending_messages.clear();
-                }
+                self.on_outbound_failure(messages_lost);
             }
 
             ConnectionEvent::ListenUpgradeError(ListenUpgradeError { error, .. }) => {
@@ -519,6 +557,11 @@ impl ConnectionHandler for Handler {
             return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                 protocol: SubstreamProtocol::new(protocol, ()),
             });
+        }
+
+        // Emit events from failed sends now, since nothing else may wake the handler
+        if let Some(event) = self.pending_events.pop_front() {
+            return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
         }
 
         Poll::Pending
@@ -580,28 +623,29 @@ mod tests {
 
         // Fill the queue to capacity
         for _ in 0..max_queue_size {
-            handler.on_behaviour_event(Message::Subscribe(topic));
+            handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"msg")));
         }
         assert_eq!(handler.pending_messages.len(), max_queue_size);
 
         // Try to add one more - should be dropped
-        handler.on_behaviour_event(Message::Unsubscribe(topic));
+        handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"more")));
         assert_eq!(handler.pending_messages.len(), max_queue_size);
 
-        // Verify all messages are Subscribe (the Unsubscribe was dropped)
+        // Verify the last message was dropped
         for msg in &handler.pending_messages {
-            assert!(matches!(msg, Message::Subscribe(_)));
+            assert!(matches!(msg, Message::Broadcast(_, payload) if payload.as_ref() == b"msg"));
         }
     }
 
     #[test]
     fn test_queue_preserves_order() {
         let mut handler = Handler::default();
-        let topic = Topic::new(b"topic");
+        let topic1 = Topic::new(b"topic1");
+        let topic2 = Topic::new(b"topic2");
 
-        handler.on_behaviour_event(Message::Subscribe(topic));
-        handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"msg")));
-        handler.on_behaviour_event(Message::Unsubscribe(topic));
+        handler.on_behaviour_event(Message::Subscribe(topic1));
+        handler.on_behaviour_event(Message::Broadcast(topic1, Bytes::from_static(b"msg")));
+        handler.on_behaviour_event(Message::Unsubscribe(topic2));
 
         assert_eq!(handler.pending_messages.len(), 3);
         assert!(matches!(handler.pending_messages[0], Message::Subscribe(_)));
@@ -802,8 +846,7 @@ mod tests {
         assert_eq!(handler.pending_messages.len(), 10);
 
         // Additional messages should be dropped
-        handler.on_behaviour_event(Message::Subscribe(topic));
-        handler.on_behaviour_event(Message::Unsubscribe(topic));
+        handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"more")));
 
         assert_eq!(handler.pending_messages.len(), 10);
 
@@ -823,7 +866,7 @@ mod tests {
 
         // Fill the queue
         for _ in 0..5 {
-            handler.on_behaviour_event(Message::Subscribe(topic));
+            handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"msg")));
         }
         assert_eq!(handler.pending_messages.len(), 5);
 
@@ -832,46 +875,42 @@ mod tests {
         assert_eq!(handler.pending_messages.len(), 4);
 
         // Now we should be able to add another message
-        handler.on_behaviour_event(Message::Unsubscribe(topic));
+        handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"new")));
         assert_eq!(handler.pending_messages.len(), 5);
 
         // Verify the new message is at the back
         assert!(matches!(
             handler.pending_messages.back(),
-            Some(Message::Unsubscribe(_))
+            Some(Message::Broadcast(_, payload)) if payload.as_ref() == b"new"
         ));
     }
 
     #[test]
-    fn test_different_message_types_in_overflow() {
+    fn test_subscription_messages_are_kept_when_queue_is_full() {
         let config = Config::default().max_outbound_queue_size(3);
         let mut handler = Handler::new(config);
-        let topic = Topic::new(b"topic");
+        let topic1 = Topic::new(b"topic1");
+        let topic2 = Topic::new(b"topic2");
 
-        // Add different message types
-        handler.on_behaviour_event(Message::Subscribe(topic));
-        handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"data")));
-        handler.on_behaviour_event(Message::Unsubscribe(topic));
-
+        handler.on_behaviour_event(Message::Subscribe(topic1));
+        handler.on_behaviour_event(Message::Broadcast(topic1, Bytes::from_static(b"data")));
+        handler.on_behaviour_event(Message::Broadcast(topic1, Bytes::from_static(b"data")));
         assert_eq!(handler.pending_messages.len(), 3);
 
-        // Try to add more - all should be dropped regardless of type
-        handler.on_behaviour_event(Message::Subscribe(topic));
-        handler.on_behaviour_event(Message::Broadcast(topic, Bytes::from_static(b"more")));
-        handler.on_behaviour_event(Message::Unsubscribe(topic));
-
+        // A broadcast is dropped
+        handler.on_behaviour_event(Message::Broadcast(topic1, Bytes::from_static(b"more")));
         assert_eq!(handler.pending_messages.len(), 3);
 
-        // Verify original order preserved
-        assert!(matches!(handler.pending_messages[0], Message::Subscribe(_)));
-        assert!(matches!(
-            handler.pending_messages[1],
-            Message::Broadcast(_, _)
-        ));
-        assert!(matches!(
-            handler.pending_messages[2],
-            Message::Unsubscribe(_)
-        ));
+        // A subscription message replaces the pending one for the same topic
+        handler.on_behaviour_event(Message::Subscribe(topic1));
+        handler.on_behaviour_event(Message::Unsubscribe(topic1));
+        assert_eq!(handler.pending_messages.len(), 3);
+        assert_eq!(handler.pending_messages[0], Message::Unsubscribe(topic1));
+
+        // A subscription message for another topic is added
+        handler.on_behaviour_event(Message::Subscribe(topic2));
+        assert_eq!(handler.pending_messages.len(), 4);
+        assert_eq!(handler.pending_messages[3], Message::Subscribe(topic2));
     }
 
     // ==================== Substream Recovery Tests ====================
@@ -968,32 +1007,16 @@ mod tests {
             "Messages should be cleared after max attempts"
         );
 
-        // Further polls should not request substreams
+        // The behaviour is notified, and further polls should not request substreams
+        let result = handler.poll(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerEvent::OutboundClosed
+            ))
+        ));
         let result = handler.poll(&mut cx);
         assert!(matches!(result, Poll::Pending));
-    }
-
-    #[test]
-    fn test_successful_substream_resets_attempt_counter() {
-        let mut handler = Handler::default();
-        let topic = Topic::new(b"topic");
-
-        // Simulate some failed attempts
-        handler.outbound_substream_attempts = 3;
-        handler.on_behaviour_event(Message::Subscribe(topic));
-
-        // Create a mock stream for testing
-        // Note: We can't easily create a real Stream, but we can test the logic
-        // by checking the attempt counter reset behavior
-
-        // The FullyNegotiatedOutbound event would reset the counter
-        // Since we can't easily mock the stream, we verify the logic exists
-        // by checking the handler's state after simulating the event flow
-
-        assert_eq!(handler.outbound_substream_attempts, 3);
-
-        // After a successful negotiation, attempts should be reset to 0
-        // (This is verified in the actual handler code at line 183-184)
     }
 
     #[test]
@@ -1160,6 +1183,150 @@ mod tests {
         assert_eq!(handler.legacy_substreams, 0);
         assert_eq!(handler.outbound_substream_attempts, 1);
         assert!(matches!(handler.outbound, OutboundState::Legacy));
+    }
+
+    /// Simulate a failed upgrade of an outbound substream.
+    fn fail_outbound(handler: &mut Handler) {
+        let error = StreamUpgradeError::<io::Error>::Timeout;
+        let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
+        handler.on_connection_event(event);
+    }
+
+    fn count_events(handler: &Handler, f: impl Fn(&HandlerEvent) -> bool) -> usize {
+        handler
+            .pending_events
+            .iter()
+            .filter(|event| f(event))
+            .count()
+    }
+
+    #[test]
+    fn test_legacy_mode_dial_error_notifies_outbound_failed() {
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            legacy_substreams: 2,
+            ..Handler::default()
+        };
+
+        fail_outbound(&mut handler);
+        fail_outbound(&mut handler);
+
+        let failures = count_events(&handler, |e| matches!(e, HandlerEvent::OutboundFailed));
+        assert_eq!(failures, 2);
+    }
+
+    #[test]
+    fn test_failed_subscription_retry_is_notified_again() {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let topic = Topic::new(b"topic");
+
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            ..Handler::default()
+        };
+
+        handler.on_behaviour_event(Message::Subscribe(topic));
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+        ));
+        fail_outbound(&mut handler);
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerEvent::OutboundFailed
+            ))
+        ));
+
+        // The behaviour sends the subscription again, and this message is lost too
+        handler.on_behaviour_event(Message::Subscribe(topic));
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+        ));
+        fail_outbound(&mut handler);
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerEvent::OutboundFailed
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_lost_legacy_messages_count_toward_the_failure_limit() {
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            legacy_substreams: MAX_SUBSTREAM_ATTEMPTS,
+            ..Handler::default()
+        };
+
+        for _ in 0..MAX_SUBSTREAM_ATTEMPTS {
+            fail_outbound(&mut handler);
+        }
+
+        assert!(matches!(handler.outbound, OutboundState::Closed));
+        let failures = count_events(&handler, |e| matches!(e, HandlerEvent::OutboundFailed));
+        assert_eq!(failures, MAX_SUBSTREAM_ATTEMPTS - 1);
+        assert!(matches!(
+            handler.pending_events.back(),
+            Some(HandlerEvent::OutboundClosed)
+        ));
+    }
+
+    #[test]
+    fn test_sent_legacy_message_resets_the_failure_count() {
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            legacy_substreams: MAX_SUBSTREAM_ATTEMPTS,
+            ..Handler::default()
+        };
+
+        for _ in 0..MAX_SUBSTREAM_ATTEMPTS - 1 {
+            fail_outbound(&mut handler);
+        }
+        handler.on_connection_event(ConnectionEvent::FullyNegotiatedOutbound(
+            FullyNegotiatedOutbound {
+                protocol: Outbound::LegacySent,
+                info: (),
+            },
+        ));
+
+        assert_eq!(handler.outbound_substream_attempts, 0);
+        assert!(matches!(handler.outbound, OutboundState::Legacy));
+    }
+
+    #[test]
+    fn test_stream_dial_error_keeps_messages_and_does_not_notify() {
+        let mut handler = Handler::default();
+        handler.on_behaviour_event(Message::Subscribe(Topic::new(b"topic")));
+
+        let error = StreamUpgradeError::<io::Error>::Timeout;
+        let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
+        handler.on_connection_event(event);
+
+        assert_eq!(handler.pending_messages.len(), 1);
+        assert!(handler.pending_events.is_empty());
+    }
+
+    #[test]
+    fn test_giving_up_notifies_outbound_closed() {
+        let mut handler = Handler {
+            outbound_substream_attempts: MAX_SUBSTREAM_ATTEMPTS - 1,
+            ..Handler::default()
+        };
+
+        let error = StreamUpgradeError::<io::Error>::NegotiationFailed;
+        let event = ConnectionEvent::DialUpgradeError(DialUpgradeError { info: (), error });
+        handler.on_connection_event(event);
+
+        assert!(matches!(handler.outbound, OutboundState::Closed));
+        assert!(matches!(
+            handler.pending_events.pop_front(),
+            Some(HandlerEvent::OutboundClosed)
+        ));
+        assert!(handler.pending_events.is_empty());
     }
 
     #[test]

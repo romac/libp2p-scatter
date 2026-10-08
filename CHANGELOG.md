@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+* **behaviour**: Send the subscriptions again on a connection when outbound messages on it can be lost: when a legacy substream fails, or when a send on the outbound substream fails. Before, the peer did not get a lost subscription until a new connection opened.
+* **handler**: Count failed sends on the outbound substream and failed legacy substreams as outbound failures. Only a sent message resets the count, not a new substream. After 5 failures in a row, the behaviour closes the connection, and the new connection sends the subscriptions again. Before, the connection stayed open and the node dropped all messages to it.
+* **handler**: Do not drop subscription messages when the outbound queue is full. The queue keeps only the latest subscription message for each topic, which can take the queue above `max_outbound_queue_size`.
+* **metrics**: Decrease `topic_peers_counts` only when a peer unsubscribes from a topic that it was subscribed to.
+* **handler**: When a send fails, open a new substream for the remaining messages and notify the behaviour immediately. Before, the handler waited for other activity on the connection.
 
 ## v0.4.0-rc.5
 

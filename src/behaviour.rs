@@ -5,7 +5,9 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use fnv::{FnvHashMap, FnvHashSet};
 use libp2p::swarm::derive_prelude::FromSwarm;
-use libp2p::swarm::{ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, ToSwarm};
+use libp2p::swarm::{
+    CloseConnection, ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, ToSwarm,
+};
 use libp2p::{Multiaddr, PeerId};
 
 use crate::Config;
@@ -294,14 +296,17 @@ impl NetworkBehaviour for Behaviour {
             }
 
             HandlerEvent::Received(Unsubscribe(topic)) => {
-                self.connected_peers.entry(peer).or_default().remove(&topic);
-                if let Some(peers) = self.topic_subscribers.get_mut(&topic) {
-                    peers.remove(&peer);
+                // A peer can unsubscribe from a topic without a subscription before it,
+                // when its handler replaced a subscription that was not sent yet.
+                if self.connected_peers.entry(peer).or_default().remove(&topic) {
+                    #[cfg(feature = "metrics")]
+                    if let Some(metrics) = self.metrics.as_mut() {
+                        metrics.dec_topic_peers(&topic);
+                    }
                 }
 
-                #[cfg(feature = "metrics")]
-                if let Some(metrics) = self.metrics.as_mut() {
-                    metrics.dec_topic_peers(&topic);
+                if let Some(peers) = self.topic_subscribers.get_mut(&topic) {
+                    peers.remove(&peer);
                 }
 
                 self.events
@@ -328,6 +333,29 @@ impl NetworkBehaviour for Behaviour {
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.register_legacy_connection();
                 }
+            }
+
+            HandlerEvent::OutboundFailed => {
+                tracing::debug!(%peer, %connection_id, "Outbound messages may be lost, sending subscriptions again");
+
+                // Subscriptions are state, so send them again in case they were lost.
+                for topic in &self.subscribed_topics {
+                    self.events.push_back(ToSwarm::NotifyHandler {
+                        peer_id: peer,
+                        handler: NotifyHandler::One(connection_id),
+                        event: Message::Subscribe(*topic),
+                    });
+                }
+            }
+
+            HandlerEvent::OutboundClosed => {
+                tracing::warn!(%peer, %connection_id, "Cannot send messages to peer, closing the connection");
+
+                // A new connection starts with a new handler, and sends our subscriptions again.
+                self.events.push_back(ToSwarm::CloseConnection {
+                    peer_id: peer,
+                    connection: CloseConnection::One(connection_id),
+                });
             }
         }
     }
@@ -741,6 +769,92 @@ mod tests {
 
         let metrics = behaviour.metrics.as_mut().unwrap();
         assert_eq!(metrics.topic_peers(&topic), 1);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_unsubscription_without_subscription_keeps_peer_count() {
+        use crate::handler::HandlerEvent;
+
+        let topic = Topic::new(b"topic");
+        let subscriber = PeerId::random();
+        let other = PeerId::random();
+
+        let mut registry = Registry::default();
+        let mut behaviour = Behaviour::new_with_metrics(Config::default(), &mut registry);
+        behaviour.inject_connected(&subscriber);
+        behaviour.inject_connected(&other);
+
+        behaviour.on_connection_handler_event(
+            subscriber,
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Received(Message::Subscribe(topic)),
+        );
+
+        // The other peer subscribed and unsubscribed before its handler sent the subscription,
+        // so only the unsubscription arrives.
+        behaviour.on_connection_handler_event(
+            other,
+            ConnectionId::new_unchecked(1),
+            HandlerEvent::Received(Message::Unsubscribe(topic)),
+        );
+
+        let metrics = behaviour.metrics.as_mut().unwrap();
+        assert_eq!(metrics.topic_peers(&topic), 1);
+    }
+
+    #[test]
+    fn test_outbound_failed_sends_subscriptions_again() {
+        use crate::handler::HandlerEvent;
+
+        let topic1 = Topic::new(b"topic1");
+        let topic2 = Topic::new(b"topic2");
+        let peer = PeerId::random();
+        let connection_id = ConnectionId::new_unchecked(7);
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+        behaviour.subscribe(topic1);
+        behaviour.subscribe(topic2);
+        behaviour.events.clear();
+
+        behaviour.on_connection_handler_event(peer, connection_id, HandlerEvent::OutboundFailed);
+
+        let mut topics = Vec::new();
+        for event in behaviour.events.drain(..) {
+            match event {
+                ToSwarm::NotifyHandler {
+                    peer_id,
+                    handler: NotifyHandler::One(id),
+                    event: Message::Subscribe(topic),
+                } if peer_id == peer && id == connection_id => topics.push(topic),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        topics.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        assert_eq!(topics, vec![topic1, topic2]);
+    }
+
+    #[test]
+    fn test_outbound_closed_closes_the_connection() {
+        use crate::handler::HandlerEvent;
+
+        let peer = PeerId::random();
+        let connection_id = ConnectionId::new_unchecked(7);
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+
+        behaviour.on_connection_handler_event(peer, connection_id, HandlerEvent::OutboundClosed);
+
+        assert!(matches!(
+            behaviour.events.pop_front(),
+            Some(ToSwarm::CloseConnection {
+                peer_id,
+                connection: CloseConnection::One(id),
+            }) if peer_id == peer && id == connection_id
+        ));
+        assert!(behaviour.events.is_empty());
     }
 
     // ==================== Connection Lifecycle Tests ====================

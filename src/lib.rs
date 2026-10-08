@@ -26,7 +26,11 @@ pub struct Config {
     /// Maximum allowed size for messages, in bytes.
     pub max_message_size: usize,
 
-    /// Maximum number of pending messages in the outbound queue.
+    /// Maximum number of pending messages in the outbound queue of a connection.
+    ///
+    /// When the queue is full, the node drops new broadcast messages. It does not drop
+    /// subscription messages: it keeps the latest one for each topic, which can take the
+    /// queue above this limit. Pending subscription messages also count toward the limit.
     pub max_outbound_queue_size: usize,
 
     /// Whether to also support the protocol of libp2p-scatter 0.3 (`/ax/broadcast/1.0.0`),
@@ -47,7 +51,9 @@ impl Config {
         self
     }
 
-    /// Sets the maximum number of pending messages in the outbound queue.
+    /// Sets the maximum number of pending messages in the outbound queue of a connection.
+    ///
+    /// Subscription messages are not dropped and can take the queue above this limit.
     pub fn max_outbound_queue_size(mut self, max_outbound_queue_size: usize) -> Self {
         self.max_outbound_queue_size = max_outbound_queue_size;
         self
