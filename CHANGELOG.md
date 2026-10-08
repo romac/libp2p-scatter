@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.4.0-rc.6
+
 ### Fixed
 
 * **behaviour**: Send the subscriptions again on a connection when outbound messages on it can be lost: when a legacy substream fails, or when a send on the outbound substream fails. Before, the peer did not get a lost subscription until a new connection opened.
