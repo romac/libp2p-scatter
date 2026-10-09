@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-Nothing yet.
+### Performance
+
+* **benchmark**: Compare this version with libp2p-scatter 0.3.0, with two nodes on localhost (TCP, noise, yamux), at most 256 messages in flight. Run the benchmark with `cargo bench --bench throughput`:
+  * With messages of 64 B to 1 KiB, the throughput is about 15 to 25 times higher: 0.5 to 0.9 million messages per second, instead of about 36,000 for 0.3.0. The 0.3.0 protocol opens a new substream for each message.
+  * With messages of 64 KiB, the throughput is about 30% higher: about 970 MiB/s instead of 740 MiB/s. With messages of 1 MiB, both versions reach about 1 GiB/s.
+  * The median latency for a 64 B message is about 20 µs, instead of 60 µs for 0.3.0.
+  * When both nodes use this version, `legacy_protocol` has no measurable cost.
+  * Between this version, with `legacy_protocol` on, and a 0.3.0 node, throughput and latency are the same as between two 0.3.0 nodes, in both directions.
 
 ## v0.4.0-rc.6
 
