@@ -12,6 +12,7 @@
 
 * Use the `HashMap` and `HashSet` of the standard library, which hash with random keys. Remove the dependency on `fnv`.
 * Ignore received messages on topics that the node is not subscribed to. They produce no `Received` event and no metrics.
+* Ignore unsubscriptions from topics that the peer is not subscribed to. They produce no `Unsubscribed` event.
 
 ### Fixed
 

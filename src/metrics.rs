@@ -19,6 +19,8 @@ const MAX_NEVER_SUBSCRIBED_TOPICS: usize = 64;
 pub struct Metrics {
     /// Information needed to decide if a topic is allowed or not.
     topic_info: HashMap<Topic, EverSubscribed>,
+    /// Number of topics in `topic_info` that the node never subscribed to.
+    never_subscribed_topics: usize,
     /// Status of our subscription to this topic. This metric allows analyzing other topic metrics
     /// filtered by our current subscription status.
     topic_subscription_status: Family<Topic, Gauge>,
@@ -95,6 +97,7 @@ impl Metrics {
 
         Self {
             topic_info: HashMap::default(),
+            never_subscribed_topics: 0,
             topic_subscription_status,
             topic_peers_count,
             topic_msg_sent_counts,
@@ -106,22 +109,16 @@ impl Metrics {
         }
     }
 
-    fn never_subscribed_topics_count(&self) -> usize {
-        self.topic_info
-            .values()
-            .filter(|&ever_subscribed| !ever_subscribed)
-            .count()
-    }
-
     /// Registers a topic if not already known and if the bounds allow it.
     /// Returns whether the topic has metrics.
     fn register_topic(&mut self, topic: &Topic) -> bool {
         if self.topic_info.contains_key(topic) {
             true
         } else if self.topic_info.len() < MAX_TOPICS
-            && self.never_subscribed_topics_count() < MAX_NEVER_SUBSCRIBED_TOPICS
+            && self.never_subscribed_topics < MAX_NEVER_SUBSCRIBED_TOPICS
         {
             self.topic_info.insert(*topic, false);
+            self.never_subscribed_topics += 1;
             self.topic_subscription_status.get_or_create(topic).set(0);
             true
         } else {
@@ -131,7 +128,9 @@ impl Metrics {
 
     pub(crate) fn subscribe(&mut self, topic: &Topic) {
         if self.topic_info.contains_key(topic) || self.topic_info.len() < MAX_TOPICS {
-            self.topic_info.insert(*topic, true);
+            if self.topic_info.insert(*topic, true) == Some(false) {
+                self.never_subscribed_topics -= 1;
+            }
             self.topic_subscription_status.get_or_create(topic).set(1);
         }
     }
@@ -443,6 +442,20 @@ mod tests {
             metrics.topic_msg_recv_counts.get_or_create(&topic(0)).get(),
             2
         );
+    }
+
+    #[test]
+    fn test_subscription_frees_room_for_never_subscribed_topic() {
+        let mut metrics = make_metrics();
+
+        for i in 0..MAX_NEVER_SUBSCRIBED_TOPICS {
+            metrics.msg_received(&topic(i), 10);
+        }
+        metrics.subscribe(&topic(0));
+
+        let added = topic(MAX_NEVER_SUBSCRIBED_TOPICS);
+        metrics.msg_received(&added, 10);
+        assert_eq!(metrics.topic_msg_recv_counts.get_or_create(&added).get(), 1);
     }
 
     #[test]

@@ -362,12 +362,12 @@ impl NetworkBehaviour for Behaviour {
                     if let Some(metrics) = self.metrics.as_mut() {
                         metrics.dec_topic_peers(&topic);
                     }
+
+                    self.remove_subscriber(&topic, &peer);
+
+                    self.events
+                        .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(peer, topic)));
                 }
-
-                self.remove_subscriber(&topic, &peer);
-
-                self.events
-                    .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(peer, topic)));
             }
 
             HandlerEvent::InboundError(e) => {
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unsubscription_from_topic_without_subscribers_adds_no_state() {
+    fn test_unsubscription_from_topic_not_subscribed_is_ignored() {
         let topic = Topic::new(b"topic");
         let peer = PeerId::random();
 
@@ -1137,10 +1137,7 @@ mod tests {
 
         receive(&mut behaviour, peer, Message::Unsubscribe(topic));
 
-        assert_eq!(
-            generated_events(&mut behaviour),
-            vec![Event::Unsubscribed(peer, topic)]
-        );
+        assert_eq!(generated_events(&mut behaviour), vec![]);
         assert!(behaviour.topic_subscribers.is_empty());
         assert_eq!(behaviour.topics(&peer).unwrap().count(), 0);
     }
