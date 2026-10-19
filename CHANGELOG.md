@@ -11,6 +11,7 @@
 ### Changed
 
 * Use the `HashMap` and `HashSet` of the standard library, which hash with random keys. Remove the dependency on `fnv`.
+* Ignore received messages on topics that the node is not subscribed to. They produce no `Received` event and no metrics.
 
 ### Fixed
 
@@ -18,9 +19,15 @@
 
 * Remove a topic from the subscribers index when its last subscriber unsubscribes or disconnects.
 
+#### Outbound messages
+
+* Drop a message to send that exceeds `max_message_size`, and keep the substream open. This also applies to peers that use libp2p-scatter 0.3.
+* Document that `max_message_size` limits the encoded message, including its header and topic.
+
 #### Metrics
 
 * Limit the number of topics with metrics to 1024, of which at most 64 topics that the node never subscribed to.
+* Escape the topic in metric labels, as the text exposition format requires.
 
 ## v0.4.0
 

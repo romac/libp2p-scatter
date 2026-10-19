@@ -23,7 +23,7 @@ pub enum Event {
     Subscribed(PeerId, Topic),
     /// A peer has unsubscribed from a topic.
     Unsubscribed(PeerId, Topic),
-    /// A message has been received from a peer on a topic.
+    /// A message has been received from a peer on a topic this node is subscribed to.
     Received(PeerId, Topic, Bytes),
 }
 
@@ -336,6 +336,15 @@ impl NetworkBehaviour for Behaviour {
             }
 
             HandlerEvent::Received(Broadcast(topic, msg)) => {
+                if !self.subscribed_topics.contains(&topic) {
+                    tracing::debug!(
+                        %peer,
+                        ?topic,
+                        "Ignoring message on a topic this node is not subscribed to"
+                    );
+                    return;
+                }
+
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.msg_received(&topic, msg.len());
@@ -1116,6 +1125,56 @@ mod tests {
         receive(&mut behaviour, peer, Message::Unsubscribe(topic));
 
         assert!(behaviour.topic_subscribers.is_empty());
+    }
+
+    // ==================== Received Message Tests ====================
+
+    #[test]
+    fn test_message_on_topic_not_subscribed_is_ignored() {
+        let topic = Topic::new(b"topic");
+        let msg = Bytes::from_static(b"msg");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Broadcast(topic, msg.clone()));
+        assert!(generated_events(&mut behaviour).is_empty());
+
+        behaviour.subscribe(topic);
+        receive(&mut behaviour, peer, Message::Broadcast(topic, msg.clone()));
+        assert_eq!(
+            generated_events(&mut behaviour),
+            vec![Event::Received(peer, topic, msg.clone())]
+        );
+
+        behaviour.unsubscribe(topic);
+        receive(&mut behaviour, peer, Message::Broadcast(topic, msg));
+        assert!(generated_events(&mut behaviour).is_empty());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_ignored_message_has_no_metrics() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut registry = Registry::default();
+        let mut behaviour = Behaviour::new_with_metrics(Config::default(), &mut registry);
+        behaviour.inject_connected(&peer);
+
+        receive(
+            &mut behaviour,
+            peer,
+            Message::Broadcast(topic, Bytes::from_static(b"msg")),
+        );
+
+        let mut output = String::new();
+        prometheus_client::encoding::text::encode(&mut output, &registry).unwrap();
+        assert!(
+            !output.contains(r#"topic="topic""#),
+            "unexpected output: {output}"
+        );
     }
 
     // ==================== Broadcast Behavior Tests ====================

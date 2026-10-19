@@ -198,14 +198,24 @@ impl Metrics {
 
 impl EncodeLabelSet for Topic {
     fn encode(&self, mut encoder: LabelSetEncoder) -> fmt::Result {
-        use prometheus_client::encoding::{EncodeLabelKey, EncodeLabelValue};
+        use fmt::Write;
+        use prometheus_client::encoding::EncodeLabelKey;
 
         let mut label_encoder = encoder.encode_label();
         let mut key_encoder = label_encoder.encode_label_key()?;
         EncodeLabelKey::encode(&"topic", &mut key_encoder)?;
         let mut value_encoder = key_encoder.encode_label_value()?;
-        let value = String::from_utf8_lossy(self.as_ref());
-        EncodeLabelValue::encode(&value, &mut value_encoder)?;
+
+        // Escape the characters that the text exposition format reserves in label values.
+        for c in String::from_utf8_lossy(self.as_ref()).chars() {
+            match c {
+                '\\' => value_encoder.write_str(r"\\")?,
+                '"' => value_encoder.write_str(r#"\""#)?,
+                '\n' => value_encoder.write_str(r"\n")?,
+                c => value_encoder.write_char(c)?,
+            }
+        }
+
         value_encoder.finish()
     }
 }
@@ -488,6 +498,22 @@ mod tests {
 
         assert!(metrics.topic_info.is_empty());
         assert!(metrics.topic_subscription_status.get(&topic).is_none());
+    }
+
+    #[test]
+    fn test_topic_label_is_escaped() {
+        let mut registry = Registry::default();
+        let mut metrics = Metrics::new(&mut registry);
+
+        metrics.subscribe(&Topic::new(b"a\\b\"c\nd"));
+
+        let mut output = String::new();
+        prometheus_client::encoding::text::encode(&mut output, &registry).unwrap();
+
+        assert!(
+            output.contains(r#"topic_subscription_status{topic="a\\b\"c\nd"} 1"#),
+            "unexpected output: {output}"
+        );
     }
 
     // ==================== Topic Registration Tests ====================
