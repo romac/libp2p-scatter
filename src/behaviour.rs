@@ -1127,6 +1127,24 @@ mod tests {
         assert!(behaviour.topic_subscribers.is_empty());
     }
 
+    #[test]
+    fn test_unsubscription_from_topic_without_subscribers_adds_no_state() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Unsubscribe(topic));
+
+        assert_eq!(
+            generated_events(&mut behaviour),
+            vec![Event::Unsubscribed(peer, topic)]
+        );
+        assert!(behaviour.topic_subscribers.is_empty());
+        assert_eq!(behaviour.topics(&peer).unwrap().count(), 0);
+    }
+
     // ==================== Received Message Tests ====================
 
     #[test]
