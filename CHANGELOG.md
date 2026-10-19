@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+#### Subscriptions
+
+* Add `Behaviour::max_topics_per_peer` to set the maximum number of topics that a peer can subscribe to. The default is 1024. The node ignores subscriptions from a peer to more topics.
+
+### Changed
+
+* Use the `HashMap` and `HashSet` of the standard library, which hash with random keys. Remove the dependency on `fnv`.
+
+### Fixed
+
+#### Subscriptions
+
+* Remove a topic from the subscribers index when its last subscriber unsubscribes or disconnects.
+
+#### Metrics
+
+* Limit the number of topics with metrics to 1024, of which at most 64 topics that the node never subscribed to.
+
 ## v0.4.0
 
 ### Breaking Changes

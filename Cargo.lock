@@ -1480,7 +1480,6 @@ version = "0.4.0"
 dependencies = [
  "asynchronous-codec",
  "bytes",
- "fnv",
  "futures",
  "libp2p",
  "libp2p-scatter 0.3.0",
