@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+#### Subscriptions
+
+* Add `Behaviour::max_topics_per_peer` to set the maximum number of topics that a peer can subscribe to. The default is 1024. The node ignores subscriptions from a peer to more topics.
+
+### Changed
+
+* Use the `HashMap` and `HashSet` of the standard library, which hash with random keys. Remove the dependency on `fnv`.
+* Ignore received messages on topics that the node is not subscribed to. They produce no `Received` event and no metrics.
+* Ignore unsubscriptions from topics that the peer is not subscribed to. They produce no `Unsubscribed` event.
+
+### Fixed
+
+#### Subscriptions
+
+* Remove a topic from the subscribers index when its last subscriber unsubscribes or disconnects.
+
+#### Outbound messages
+
+* Drop a message to send that exceeds `max_message_size`, and keep the substream open. This also applies to peers that use libp2p-scatter 0.3.
+* Document that `max_message_size` limits the encoded message, including its header and topic.
+
+#### Metrics
+
+* Limit the number of topics with metrics to 1024, of which at most 64 topics that the node never subscribed to.
+* Escape the topic in metric labels, as the text exposition format requires.
+
 ## v0.4.0
 
 ### Breaking Changes

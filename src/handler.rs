@@ -167,8 +167,8 @@ impl Handler {
             match self.outbound.take() {
                 OutboundState::Ready(mut sink) => {
                     match self.try_send_message(&mut sink, cx) {
-                        SendResult::Sent => {
-                            // Message sent, put sink back and try to send more
+                        SendResult::Sent | SendResult::Dropped => {
+                            // Message sent or dropped, put sink back and try to send more
                             self.outbound = OutboundState::Ready(sink);
                         }
                         SendResult::Pending(message) => {
@@ -217,6 +217,13 @@ impl Handler {
                             );
                             continue;
                         };
+                        if encoded.len() > self.config.max_message_size {
+                            warn!(
+                                topic = %message.topic(),
+                                "Dropping message: larger than the maximum message size"
+                            );
+                            continue;
+                        }
                         trace!(?message, "Requesting legacy substream for message");
                         self.legacy_substreams += 1;
                         return OutboundPollResult::RequestSubstream(OutboundProtocol::Legacy(
@@ -260,10 +267,12 @@ impl Handler {
             Poll::Pending => return SendResult::Pending(message),
         }
 
-        // Start sending the message
+        // Start sending the message. This only encodes the message into the buffer of the sink,
+        // so an error concerns this message and not the substream.
+        let topic = *message.topic();
         if let Err(e) = Pin::new(&mut *sink).start_send(message) {
-            debug!("Error sending on outbound substream: {}", e);
-            return SendResult::Error;
+            warn!(%topic, "Dropping message: {e}");
+            return SendResult::Dropped;
         }
 
         // Flush the message
@@ -359,6 +368,8 @@ impl Handler {
 enum SendResult {
     /// Message was sent successfully.
     Sent,
+    /// Message could not be encoded and was dropped.
+    Dropped,
     /// Sink not ready, message returned for retry.
     Pending(Message),
     /// An error occurred.
@@ -1356,6 +1367,41 @@ mod tests {
         }
         assert!(handler.pending_messages.is_empty());
         assert_eq!(handler.legacy_substreams, 1);
+    }
+
+    #[test]
+    fn test_legacy_mode_drops_message_above_max_size() {
+        let max_message_size = 64;
+        let mut handler = Handler {
+            outbound: OutboundState::Legacy,
+            ..Handler::new(Config::default().max_message_size(max_message_size))
+        };
+        let topic = Topic::new(b"topic");
+        let message = Message::Broadcast(topic, Bytes::from_static(b"small"));
+
+        handler.on_behaviour_event(Message::Broadcast(
+            topic,
+            Bytes::from(vec![0; max_message_size]),
+        ));
+        handler.on_behaviour_event(message.clone());
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match handler.poll(&mut cx) {
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol }) => {
+                match protocol.upgrade() {
+                    OutboundProtocol::Legacy(encoded) => {
+                        assert_eq!(*encoded, legacy::encode(&message).unwrap());
+                    }
+                    _ => panic!("Expected legacy upgrade"),
+                }
+            }
+            _ => panic!("Expected OutboundSubstreamRequest"),
+        }
+        assert!(handler.pending_messages.is_empty());
+        assert_eq!(handler.legacy_substreams, 1);
+        assert!(handler.pending_events.is_empty());
     }
 
     #[test]

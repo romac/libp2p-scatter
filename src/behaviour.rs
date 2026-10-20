@@ -1,9 +1,8 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use fnv::{FnvHashMap, FnvHashSet};
 use libp2p::swarm::derive_prelude::FromSwarm;
 use libp2p::swarm::{
     CloseConnection, ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler, ToSwarm,
@@ -24,23 +23,43 @@ pub enum Event {
     Subscribed(PeerId, Topic),
     /// A peer has unsubscribed from a topic.
     Unsubscribed(PeerId, Topic),
-    /// A message has been received from a peer on a topic.
+    /// A message has been received from a peer on a topic this node is subscribed to.
     Received(PeerId, Topic, Bytes),
 }
 
+/// Default maximum number of topics that a peer can subscribe to.
+const DEFAULT_MAX_TOPICS_PER_PEER: usize = 1024;
+
 /// Network behaviour that handles the scatter protocol
-#[derive(Default)]
 pub struct Behaviour {
     config: Config,
+    /// Maximum number of topics that a peer can subscribe to.
+    max_topics_per_peer: usize,
     /// Map from peer to the set of topics they are subscribed to.
-    connected_peers: FnvHashMap<PeerId, FnvHashSet<Topic>>,
+    connected_peers: HashMap<PeerId, HashSet<Topic>>,
     /// Reverse index: map from topic to the set of peers subscribed to it.
-    topic_subscribers: FnvHashMap<Topic, FnvHashSet<PeerId>>,
-    subscribed_topics: FnvHashSet<Topic>,
+    /// A topic without subscribers has no entry.
+    topic_subscribers: HashMap<Topic, HashSet<PeerId>>,
+    subscribed_topics: HashSet<Topic>,
     events: VecDeque<ToSwarm<Event, Message>>,
 
     #[cfg(feature = "metrics")]
     metrics: Option<Metrics>,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            config: Config::default(),
+            max_topics_per_peer: DEFAULT_MAX_TOPICS_PER_PEER,
+            connected_peers: HashMap::default(),
+            topic_subscribers: HashMap::default(),
+            subscribed_topics: HashSet::default(),
+            events: VecDeque::default(),
+            #[cfg(feature = "metrics")]
+            metrics: None,
+        }
+    }
 }
 
 impl fmt::Debug for Behaviour {
@@ -71,6 +90,15 @@ impl Behaviour {
             metrics: Some(Metrics::new(registry)),
             ..Default::default()
         }
+    }
+
+    /// Sets the maximum number of topics that a peer can subscribe to.
+    ///
+    /// The node ignores subscriptions from a peer to more topics.
+    /// The default is 1024.
+    pub fn max_topics_per_peer(mut self, max_topics_per_peer: usize) -> Self {
+        self.max_topics_per_peer = max_topics_per_peer;
+        self
     }
 
     /// Returns an iterator over the topics this node is subscribed to.
@@ -188,7 +216,7 @@ impl Behaviour {
     }
 
     fn inject_connected(&mut self, peer: &PeerId) {
-        self.connected_peers.insert(*peer, FnvHashSet::default());
+        self.connected_peers.insert(*peer, HashSet::default());
         for topic in &self.subscribed_topics {
             self.events.push_back(ToSwarm::NotifyHandler {
                 peer_id: *peer,
@@ -201,10 +229,7 @@ impl Behaviour {
     fn inject_disconnected(&mut self, peer: &PeerId) {
         if let Some(topics) = self.connected_peers.remove(peer) {
             for topic in topics {
-                // Remove from reverse index
-                if let Some(peers) = self.topic_subscribers.get_mut(&topic) {
-                    peers.remove(peer);
-                }
+                self.remove_subscriber(&topic, peer);
 
                 self.events
                     .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(*peer, topic)));
@@ -213,6 +238,18 @@ impl Behaviour {
                 if let Some(metrics) = &mut self.metrics {
                     metrics.dec_topic_peers(&topic);
                 }
+            }
+        }
+    }
+
+    /// Removes `peer` from the subscribers of `topic`,
+    /// and removes the topic when it has no subscribers left.
+    fn remove_subscriber(&mut self, topic: &Topic, peer: &PeerId) {
+        if let Some(peers) = self.topic_subscribers.get_mut(topic) {
+            peers.remove(peer);
+
+            if peers.is_empty() {
+                self.topic_subscribers.remove(topic);
             }
         }
     }
@@ -268,8 +305,21 @@ impl NetworkBehaviour for Behaviour {
 
         match event {
             HandlerEvent::Received(Subscribe(topic)) => {
+                let topics = self.connected_peers.entry(peer).or_default();
+
                 // A peer can send the same subscription again, see `announce`.
-                if self.connected_peers.entry(peer).or_default().insert(topic) {
+                if !topics.contains(&topic) {
+                    if topics.len() >= self.max_topics_per_peer {
+                        tracing::debug!(
+                            %peer,
+                            ?topic,
+                            "Ignoring subscription: peer reached the maximum number of topics"
+                        );
+                        return;
+                    }
+
+                    topics.insert(topic);
+
                     #[cfg(feature = "metrics")]
                     if let Some(metrics) = self.metrics.as_mut() {
                         metrics.inc_topic_peers(&topic);
@@ -286,6 +336,15 @@ impl NetworkBehaviour for Behaviour {
             }
 
             HandlerEvent::Received(Broadcast(topic, msg)) => {
+                if !self.subscribed_topics.contains(&topic) {
+                    tracing::debug!(
+                        %peer,
+                        ?topic,
+                        "Ignoring message on a topic this node is not subscribed to"
+                    );
+                    return;
+                }
+
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
                     metrics.msg_received(&topic, msg.len());
@@ -303,14 +362,12 @@ impl NetworkBehaviour for Behaviour {
                     if let Some(metrics) = self.metrics.as_mut() {
                         metrics.dec_topic_peers(&topic);
                     }
-                }
 
-                if let Some(peers) = self.topic_subscribers.get_mut(&topic) {
-                    peers.remove(&peer);
-                }
+                    self.remove_subscriber(&topic, &peer);
 
-                self.events
-                    .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(peer, topic)));
+                    self.events
+                        .push_back(ToSwarm::GenerateEvent(Event::Unsubscribed(peer, topic)));
+                }
             }
 
             HandlerEvent::InboundError(e) => {
@@ -378,7 +435,7 @@ mod tests {
     struct DummySwarm {
         peer_id: PeerId,
         behaviour: Arc<Mutex<Behaviour>>,
-        connections: FnvHashMap<PeerId, Arc<Mutex<Behaviour>>>,
+        connections: HashMap<PeerId, Arc<Mutex<Behaviour>>>,
     }
 
     impl DummySwarm {
@@ -747,6 +804,142 @@ mod tests {
         assert!(a.next().is_none());
     }
 
+    // ==================== Topic Limit Tests ====================
+
+    fn receive(behaviour: &mut Behaviour, peer: PeerId, message: Message) {
+        use crate::handler::HandlerEvent;
+
+        behaviour.on_connection_handler_event(
+            peer,
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Received(message),
+        );
+    }
+
+    fn generated_events(behaviour: &mut Behaviour) -> Vec<Event> {
+        behaviour
+            .events
+            .drain(..)
+            .filter_map(|event| match event {
+                ToSwarm::GenerateEvent(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sorted_topics(behaviour: &Behaviour, peer: &PeerId) -> Vec<Topic> {
+        let mut topics: Vec<_> = behaviour.topics(peer).unwrap().copied().collect();
+        topics.sort();
+        topics
+    }
+
+    #[test]
+    fn test_subscriptions_beyond_max_topics_per_peer_are_ignored() {
+        let topics = [
+            Topic::new(b"topic1"),
+            Topic::new(b"topic2"),
+            Topic::new(b"topic3"),
+        ];
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::new(Config::default()).max_topics_per_peer(2);
+        behaviour.inject_connected(&peer);
+
+        for topic in topics {
+            receive(&mut behaviour, peer, Message::Subscribe(topic));
+        }
+
+        assert_eq!(
+            generated_events(&mut behaviour),
+            vec![
+                Event::Subscribed(peer, topics[0]),
+                Event::Subscribed(peer, topics[1]),
+            ]
+        );
+        assert_eq!(sorted_topics(&behaviour, &peer), topics[..2]);
+        assert_eq!(behaviour.peers(topics[2]).count(), 0);
+        assert!(!behaviour.topic_subscribers.contains_key(&topics[2]));
+    }
+
+    #[test]
+    fn test_peer_at_max_topics_can_subscribe_again_to_its_topics() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::new(Config::default()).max_topics_per_peer(1);
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Subscribe(topic));
+        generated_events(&mut behaviour);
+
+        receive(&mut behaviour, peer, Message::Subscribe(topic));
+
+        assert_eq!(
+            generated_events(&mut behaviour),
+            vec![Event::Subscribed(peer, topic)]
+        );
+        assert_eq!(behaviour.peers(topic).collect::<Vec<_>>(), vec![peer]);
+    }
+
+    #[test]
+    fn test_unsubscription_frees_room_for_another_topic() {
+        let topic1 = Topic::new(b"topic1");
+        let topic2 = Topic::new(b"topic2");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::new(Config::default()).max_topics_per_peer(1);
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Subscribe(topic1));
+        receive(&mut behaviour, peer, Message::Unsubscribe(topic1));
+        receive(&mut behaviour, peer, Message::Subscribe(topic2));
+
+        assert_eq!(sorted_topics(&behaviour, &peer), vec![topic2]);
+        assert_eq!(behaviour.peers(topic2).collect::<Vec<_>>(), vec![peer]);
+    }
+
+    #[test]
+    fn test_default_max_topics_per_peer() {
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::new(Config::default());
+        behaviour.inject_connected(&peer);
+
+        for i in 0..=DEFAULT_MAX_TOPICS_PER_PEER {
+            let topic = Topic::new(format!("topic{i}").as_bytes());
+            receive(&mut behaviour, peer, Message::Subscribe(topic));
+        }
+
+        assert_eq!(
+            behaviour.topics(&peer).unwrap().count(),
+            DEFAULT_MAX_TOPICS_PER_PEER
+        );
+        assert_eq!(
+            behaviour.topic_subscribers.len(),
+            DEFAULT_MAX_TOPICS_PER_PEER
+        );
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_ignored_subscription_does_not_count_peer() {
+        let topic1 = Topic::new(b"topic1");
+        let topic2 = Topic::new(b"topic2");
+        let peer = PeerId::random();
+
+        let mut registry = Registry::default();
+        let mut behaviour =
+            Behaviour::new_with_metrics(Config::default(), &mut registry).max_topics_per_peer(1);
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Subscribe(topic1));
+        receive(&mut behaviour, peer, Message::Subscribe(topic2));
+
+        let metrics = behaviour.metrics.as_mut().unwrap();
+        assert_eq!(metrics.topic_peers(&topic1), 1);
+        assert_eq!(metrics.topic_peers(&topic2), 0);
+    }
+
     #[cfg(feature = "metrics")]
     #[test]
     fn test_repeated_subscription_counts_peer_once() {
@@ -893,6 +1086,110 @@ mod tests {
             let peers: Vec<_> = behaviour.peers(topic).collect();
             assert!(!peers.contains(&b_peer_id));
         }
+    }
+
+    #[test]
+    fn test_disconnect_removes_topics_without_subscribers() {
+        let shared = Topic::new(b"shared");
+        let single = Topic::new(b"single");
+        let peer1 = PeerId::random();
+        let peer2 = PeerId::random();
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer1);
+        behaviour.inject_connected(&peer2);
+
+        receive(&mut behaviour, peer1, Message::Subscribe(shared));
+        receive(&mut behaviour, peer1, Message::Subscribe(single));
+        receive(&mut behaviour, peer2, Message::Subscribe(shared));
+
+        behaviour.inject_disconnected(&peer1);
+
+        assert!(!behaviour.topic_subscribers.contains_key(&single));
+        assert_eq!(behaviour.peers(shared).collect::<Vec<_>>(), vec![peer2]);
+
+        behaviour.inject_disconnected(&peer2);
+
+        assert!(behaviour.topic_subscribers.is_empty());
+    }
+
+    #[test]
+    fn test_unsubscription_removes_topic_without_subscribers() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Subscribe(topic));
+        receive(&mut behaviour, peer, Message::Unsubscribe(topic));
+
+        assert!(behaviour.topic_subscribers.is_empty());
+    }
+
+    #[test]
+    fn test_unsubscription_from_topic_not_subscribed_is_ignored() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Unsubscribe(topic));
+
+        assert_eq!(generated_events(&mut behaviour), vec![]);
+        assert!(behaviour.topic_subscribers.is_empty());
+        assert_eq!(behaviour.topics(&peer).unwrap().count(), 0);
+    }
+
+    // ==================== Received Message Tests ====================
+
+    #[test]
+    fn test_message_on_topic_not_subscribed_is_ignored() {
+        let topic = Topic::new(b"topic");
+        let msg = Bytes::from_static(b"msg");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::default();
+        behaviour.inject_connected(&peer);
+
+        receive(&mut behaviour, peer, Message::Broadcast(topic, msg.clone()));
+        assert!(generated_events(&mut behaviour).is_empty());
+
+        behaviour.subscribe(topic);
+        receive(&mut behaviour, peer, Message::Broadcast(topic, msg.clone()));
+        assert_eq!(
+            generated_events(&mut behaviour),
+            vec![Event::Received(peer, topic, msg.clone())]
+        );
+
+        behaviour.unsubscribe(topic);
+        receive(&mut behaviour, peer, Message::Broadcast(topic, msg));
+        assert!(generated_events(&mut behaviour).is_empty());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_ignored_message_has_no_metrics() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut registry = Registry::default();
+        let mut behaviour = Behaviour::new_with_metrics(Config::default(), &mut registry);
+        behaviour.inject_connected(&peer);
+
+        receive(
+            &mut behaviour,
+            peer,
+            Message::Broadcast(topic, Bytes::from_static(b"msg")),
+        );
+
+        let mut output = String::new();
+        prometheus_client::encoding::text::encode(&mut output, &registry).unwrap();
+        assert!(
+            !output.contains(r#"topic="topic""#),
+            "unexpected output: {output}"
+        );
     }
 
     // ==================== Broadcast Behavior Tests ====================

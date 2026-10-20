@@ -23,7 +23,10 @@ pub struct Config {
     /// The protocol name used for substream negotiation.
     pub protocol_name: StreamProtocol,
 
-    /// Maximum allowed size for messages, in bytes.
+    /// Maximum size of an encoded message, in bytes, including its header and topic.
+    ///
+    /// The node drops the messages to send that exceed it,
+    /// and rejects the received messages that exceed it.
     pub max_message_size: usize,
 
     /// Maximum number of pending messages in the outbound queue of a connection.
@@ -45,7 +48,7 @@ impl Config {
         self
     }
 
-    /// Sets the maximum allowed size for messages, in bytes.
+    /// Sets the maximum size of an encoded message, in bytes, including its header and topic.
     pub fn max_message_size(mut self, max_message_size: usize) -> Self {
         self.max_message_size = max_message_size;
         self

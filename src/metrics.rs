@@ -1,6 +1,5 @@
 use core::fmt;
-
-use fnv::FnvHashMap as HashMap;
+use std::collections::HashMap;
 
 use prometheus_client::encoding::{EncodeLabelSet, LabelSetEncoder};
 use prometheus_client::metrics::counter::Counter;
@@ -11,9 +10,17 @@ pub use prometheus_client::registry::Registry;
 
 use crate::Topic;
 
+/// Maximum number of topics with metrics.
+const MAX_TOPICS: usize = 1024;
+
+/// Maximum number of topics with metrics that the node never subscribed to.
+const MAX_NEVER_SUBSCRIBED_TOPICS: usize = 64;
+
 pub struct Metrics {
     /// Information needed to decide if a topic is allowed or not.
     topic_info: HashMap<Topic, EverSubscribed>,
+    /// Number of topics in `topic_info` that the node never subscribed to.
+    never_subscribed_topics: usize,
     /// Status of our subscription to this topic. This metric allows analyzing other topic metrics
     /// filtered by our current subscription status.
     topic_subscription_status: Family<Topic, Gauge>,
@@ -90,6 +97,7 @@ impl Metrics {
 
         Self {
             topic_info: HashMap::default(),
+            never_subscribed_topics: 0,
             topic_subscription_status,
             topic_peers_count,
             topic_msg_sent_counts,
@@ -101,29 +109,43 @@ impl Metrics {
         }
     }
 
-    /// Registers a topic if not already known
-    fn register_topic(&mut self, topic: &Topic) {
-        if !self.topic_info.contains_key(topic) {
-            self.topic_info.entry(*topic).or_insert(false);
+    /// Registers a topic if not already known and if the bounds allow it.
+    /// Returns whether the topic has metrics.
+    fn register_topic(&mut self, topic: &Topic) -> bool {
+        if self.topic_info.contains_key(topic) {
+            true
+        } else if self.topic_info.len() < MAX_TOPICS
+            && self.never_subscribed_topics < MAX_NEVER_SUBSCRIBED_TOPICS
+        {
+            self.topic_info.insert(*topic, false);
+            self.never_subscribed_topics += 1;
             self.topic_subscription_status.get_or_create(topic).set(0);
+            true
+        } else {
+            false
         }
     }
 
     pub(crate) fn subscribe(&mut self, topic: &Topic) {
-        self.register_topic(topic);
-        *self.topic_info.entry(*topic).or_default() = true;
-        self.topic_subscription_status.get_or_create(topic).set(1);
+        if self.topic_info.contains_key(topic) || self.topic_info.len() < MAX_TOPICS {
+            if self.topic_info.insert(*topic, true) == Some(false) {
+                self.never_subscribed_topics -= 1;
+            }
+            self.topic_subscription_status.get_or_create(topic).set(1);
+        }
     }
 
     pub(crate) fn unsubscribe(&mut self, topic: &Topic) {
-        self.register_topic(topic);
-        self.topic_subscription_status.get_or_create(topic).set(0);
+        if self.topic_info.contains_key(topic) {
+            self.topic_subscription_status.get_or_create(topic).set(0);
+        }
     }
 
     /// Increase the number of peers that are subscribed to this topic.
     pub(crate) fn inc_topic_peers(&mut self, topic: &Topic) {
-        self.register_topic(topic);
-        self.topic_peers_count.get_or_create(topic).inc();
+        if self.register_topic(topic) {
+            self.topic_peers_count.get_or_create(topic).inc();
+        }
     }
 
     #[cfg(test)]
@@ -133,35 +155,38 @@ impl Metrics {
 
     /// Decrease the number of peers that are subscribed to this topic.
     pub(crate) fn dec_topic_peers(&mut self, topic: &Topic) {
-        self.register_topic(topic);
-
-        let gauge = self.topic_peers_count.get_or_create(topic);
-        if gauge.get() > 0 {
-            gauge.dec();
+        if self.register_topic(topic) {
+            let gauge = self.topic_peers_count.get_or_create(topic);
+            if gauge.get() > 0 {
+                gauge.dec();
+            }
         }
     }
 
     pub(crate) fn register_published_message(&mut self, topic: &Topic) {
-        self.register_topic(topic);
-        self.topic_msg_published.get_or_create(topic).inc();
+        if self.register_topic(topic) {
+            self.topic_msg_published.get_or_create(topic).inc();
+        }
     }
 
     /// Register sending a message over a topic.
     pub(crate) fn msg_sent(&mut self, topic: &Topic, bytes: usize) {
-        self.register_topic(topic);
-        self.topic_msg_sent_counts.get_or_create(topic).inc();
-        self.topic_msg_sent_bytes
-            .get_or_create(topic)
-            .inc_by(bytes as u64);
+        if self.register_topic(topic) {
+            self.topic_msg_sent_counts.get_or_create(topic).inc();
+            self.topic_msg_sent_bytes
+                .get_or_create(topic)
+                .inc_by(bytes as u64);
+        }
     }
 
     /// Register that a message was received .
     pub(crate) fn msg_received(&mut self, topic: &Topic, bytes: usize) {
-        self.register_topic(topic);
-        self.topic_msg_recv_counts.get_or_create(topic).inc();
-        self.topic_msg_recv_bytes
-            .get_or_create(topic)
-            .inc_by(bytes as u64);
+        if self.register_topic(topic) {
+            self.topic_msg_recv_counts.get_or_create(topic).inc();
+            self.topic_msg_recv_bytes
+                .get_or_create(topic)
+                .inc_by(bytes as u64);
+        }
     }
 
     /// Register that a connection fell back to the legacy protocol.
@@ -172,14 +197,24 @@ impl Metrics {
 
 impl EncodeLabelSet for Topic {
     fn encode(&self, mut encoder: LabelSetEncoder) -> fmt::Result {
-        use prometheus_client::encoding::{EncodeLabelKey, EncodeLabelValue};
+        use fmt::Write;
+        use prometheus_client::encoding::EncodeLabelKey;
 
         let mut label_encoder = encoder.encode_label();
         let mut key_encoder = label_encoder.encode_label_key()?;
         EncodeLabelKey::encode(&"topic", &mut key_encoder)?;
         let mut value_encoder = key_encoder.encode_label_value()?;
-        let value = String::from_utf8_lossy(self.as_ref());
-        EncodeLabelValue::encode(&value, &mut value_encoder)?;
+
+        // Escape the characters that the text exposition format reserves in label values.
+        for c in String::from_utf8_lossy(self.as_ref()).chars() {
+            match c {
+                '\\' => value_encoder.write_str(r"\\")?,
+                '"' => value_encoder.write_str(r#"\""#)?,
+                '\n' => value_encoder.write_str(r"\n")?,
+                c => value_encoder.write_char(c)?,
+            }
+        }
+
         value_encoder.finish()
     }
 }
@@ -371,6 +406,127 @@ mod tests {
             200
         );
         assert_eq!(metrics.topic_peers_count.get_or_create(&topic2).get(), 2);
+    }
+
+    // ==================== Topic Bound Tests ====================
+
+    fn topic(i: usize) -> Topic {
+        Topic::new(format!("topic{i}").as_bytes())
+    }
+
+    #[test]
+    fn test_never_subscribed_topics_are_bounded() {
+        let mut metrics = make_metrics();
+
+        for i in 0..=MAX_NEVER_SUBSCRIBED_TOPICS {
+            metrics.msg_received(&topic(i), 10);
+        }
+
+        let rejected = topic(MAX_NEVER_SUBSCRIBED_TOPICS);
+        assert_eq!(metrics.topic_info.len(), MAX_NEVER_SUBSCRIBED_TOPICS);
+        assert!(metrics.topic_msg_recv_counts.get(&rejected).is_none());
+        assert!(metrics.topic_msg_recv_bytes.get(&rejected).is_none());
+        assert!(metrics.topic_subscription_status.get(&rejected).is_none());
+
+        metrics.inc_topic_peers(&rejected);
+        metrics.dec_topic_peers(&rejected);
+        metrics.msg_sent(&rejected, 10);
+        metrics.register_published_message(&rejected);
+        assert!(metrics.topic_peers_count.get(&rejected).is_none());
+        assert!(metrics.topic_msg_sent_counts.get(&rejected).is_none());
+        assert!(metrics.topic_msg_published.get(&rejected).is_none());
+
+        // A topic that already has metrics keeps them.
+        metrics.msg_received(&topic(0), 10);
+        assert_eq!(
+            metrics.topic_msg_recv_counts.get_or_create(&topic(0)).get(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_subscription_frees_room_for_never_subscribed_topic() {
+        let mut metrics = make_metrics();
+
+        for i in 0..MAX_NEVER_SUBSCRIBED_TOPICS {
+            metrics.msg_received(&topic(i), 10);
+        }
+        metrics.subscribe(&topic(0));
+
+        let added = topic(MAX_NEVER_SUBSCRIBED_TOPICS);
+        metrics.msg_received(&added, 10);
+        assert_eq!(metrics.topic_msg_recv_counts.get_or_create(&added).get(), 1);
+    }
+
+    #[test]
+    fn test_subscribed_topics_do_not_count_toward_never_subscribed_bound() {
+        let mut metrics = make_metrics();
+
+        for i in 0..MAX_NEVER_SUBSCRIBED_TOPICS {
+            metrics.msg_received(&topic(i), 10);
+        }
+
+        let subscribed = topic(MAX_NEVER_SUBSCRIBED_TOPICS);
+        metrics.subscribe(&subscribed);
+        metrics.msg_sent(&subscribed, 10);
+
+        assert_eq!(
+            metrics
+                .topic_subscription_status
+                .get_or_create(&subscribed)
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .topic_msg_sent_counts
+                .get_or_create(&subscribed)
+                .get(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_topics_are_bounded() {
+        let mut metrics = make_metrics();
+
+        for i in 0..=MAX_TOPICS {
+            metrics.subscribe(&topic(i));
+        }
+
+        let rejected = topic(MAX_TOPICS);
+        assert_eq!(metrics.topic_info.len(), MAX_TOPICS);
+        assert!(metrics.topic_subscription_status.get(&rejected).is_none());
+
+        metrics.msg_sent(&rejected, 10);
+        assert!(metrics.topic_msg_sent_counts.get(&rejected).is_none());
+    }
+
+    #[test]
+    fn test_unsubscribe_from_unknown_topic_has_no_metrics() {
+        let mut metrics = make_metrics();
+        let topic = Topic::new(b"test-topic");
+
+        metrics.unsubscribe(&topic);
+
+        assert!(metrics.topic_info.is_empty());
+        assert!(metrics.topic_subscription_status.get(&topic).is_none());
+    }
+
+    #[test]
+    fn test_topic_label_is_escaped() {
+        let mut registry = Registry::default();
+        let mut metrics = Metrics::new(&mut registry);
+
+        metrics.subscribe(&Topic::new(b"a\\b\"c\nd"));
+
+        let mut output = String::new();
+        prometheus_client::encoding::text::encode(&mut output, &registry).unwrap();
+
+        assert!(
+            output.contains(r#"topic_subscription_status{topic="a\\b\"c\nd"} 1"#),
+            "unexpected output: {output}"
+        );
     }
 
     // ==================== Topic Registration Tests ====================

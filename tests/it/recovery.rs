@@ -1,4 +1,4 @@
-//! Tests that a node sends its subscriptions again when outbound messages may be lost.
+//! Tests of how a node handles messages that it cannot send.
 
 use std::time::Duration;
 
@@ -26,17 +26,17 @@ fn create_swarm(config: Config) -> Swarm<Behaviour> {
         .build()
 }
 
-#[tokio::test]
-#[test_log::test]
-async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
-    let topic = Topic::new(b"topic");
-
-    let mut sender = create_swarm(Config::default());
+/// Connects a sender to a receiver, both subscribed to `topic`,
+/// and waits until each node knows that the other is subscribed.
+async fn subscribed_pair(
+    sender_config: Config,
+    receiver_config: Config,
+    topic: Topic,
+) -> (Swarm<Behaviour>, Swarm<Behaviour>) {
+    let mut sender = create_swarm(sender_config);
     let sender_id = *sender.local_peer_id();
 
-    // The receiver drops its inbound stream when a message is too large,
-    // which makes the next writes of the sender fail.
-    let mut receiver = create_swarm(Config::default().max_message_size(MAX_MESSAGE_SIZE));
+    let mut receiver = create_swarm(receiver_config);
     let receiver_id = *receiver.local_peer_id();
 
     receiver
@@ -72,6 +72,25 @@ async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
     })
     .await
     .expect("Timeout waiting for the initial subscriptions");
+
+    (sender, receiver)
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
+    let topic = Topic::new(b"topic");
+
+    // The receiver drops its inbound stream when a message is too large,
+    // which makes the next writes of the sender fail.
+    let (mut sender, mut receiver) = subscribed_pair(
+        Config::default(),
+        Config::default().max_message_size(MAX_MESSAGE_SIZE),
+        topic,
+    )
+    .await;
+    let sender_id = *sender.local_peer_id();
+    let receiver_id = *receiver.local_peer_id();
 
     sender
         .behaviour_mut()
@@ -111,5 +130,48 @@ async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
     .await
     .expect("The sender did not send its subscription again");
 
+    assert!(sender.is_connected(&receiver_id));
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_messages_above_max_size_are_dropped_without_closing_the_stream() {
+    let topic = Topic::new(b"topic");
+
+    let (mut sender, mut receiver) = subscribed_pair(
+        Config::default().max_message_size(MAX_MESSAGE_SIZE),
+        Config::default(),
+        topic,
+    )
+    .await;
+    let sender_id = *sender.local_peer_id();
+    let receiver_id = *receiver.local_peer_id();
+
+    // More messages than the failed sends in a row after which a connection is closed.
+    for _ in 0..10 {
+        sender
+            .behaviour_mut()
+            .broadcast(topic, Bytes::from(vec![0; 2 * MAX_MESSAGE_SIZE]));
+    }
+    sender
+        .behaviour_mut()
+        .broadcast(topic, Bytes::from_static(b"msg"));
+
+    let received = timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                _ = sender.select_next_some() => {}
+                event = receiver.select_next_some() => {
+                    if let SwarmEvent::Behaviour(Event::Received(peer, t, payload)) = event {
+                        break (peer, t, payload);
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("The receiver did not receive the message");
+
+    assert_eq!(received, (sender_id, topic, Bytes::from_static(b"msg")));
     assert!(sender.is_connected(&receiver_id));
 }
