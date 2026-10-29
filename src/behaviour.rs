@@ -1263,12 +1263,19 @@ mod tests {
         receive(&mut behaviour, peer, Message::Subscribe(topic));
         behaviour.events.clear();
 
+        let err = behaviour
+            .broadcast(topic, Bytes::from_static(b"12345"))
+            .unwrap_err();
         assert_eq!(
-            behaviour.broadcast(topic, Bytes::from_static(b"12345")),
-            Err(BroadcastError::PayloadTooLarge {
+            err,
+            BroadcastError::PayloadTooLarge {
                 size: 5,
                 max_size: 4
-            })
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "payload of 5 bytes exceeds the maximum message size of 4 bytes"
         );
         assert!(behaviour.events.is_empty());
 
