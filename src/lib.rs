@@ -26,7 +26,8 @@ pub struct Config {
     /// Maximum size of a message payload, in bytes.
     ///
     /// [`Behaviour::broadcast`] refuses a larger payload. The node rejects a received
-    /// message that is larger than this size plus the size of the message header and topic.
+    /// message that is larger than this size plus 76 bytes, the largest size of a message
+    /// header and topic.
     pub max_message_size: usize,
 
     /// Maximum number of pending messages in the outbound queue of a connection.

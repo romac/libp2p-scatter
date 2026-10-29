@@ -10,7 +10,8 @@
 
 #### Configuration
 
-* `max_message_size` limits the payload of a message, instead of the encoded message. The node accepts received messages up to `max_message_size` plus the largest size of a message header and topic, 76 bytes. This also applies to peers that use libp2p-scatter 0.3. A node that runs 0.4.1 with the same `max_message_size` still drops payloads within 76 bytes of the limit.
+* `max_message_size` limits the payload of a message, instead of the encoded message. The node accepts received messages up to `max_message_size` plus the largest size of a message header and topic, 76 bytes. This also applies to peers that use libp2p-scatter 0.3.
+* A node that runs 0.4.1 with the same `max_message_size` rejects a payload within 76 bytes of the limit from an upgraded peer, and closes its inbound stream from that peer, which loses the messages sent after it until the peer opens a new stream. During a rolling upgrade, raise `max_message_size` by 76 on the nodes that still run 0.4.1, or lower it by 76 on the upgraded nodes.
 
 ### Fixed
 
