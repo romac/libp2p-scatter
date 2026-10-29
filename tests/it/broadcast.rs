@@ -51,7 +51,8 @@ async fn test_broadcast_delivery() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(topic, payload.clone());
+        .broadcast(topic, payload.clone())
+        .unwrap();
 
     info!("Node 0 broadcasted message on topic");
 
@@ -108,7 +109,8 @@ async fn test_multiple_topics() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(topic1, msg1.clone());
+        .broadcast(topic1, msg1.clone())
+        .unwrap();
 
     // Node 1 receives on topic1
     let event = network
@@ -152,7 +154,8 @@ async fn test_multiple_broadcasts_in_sequence() {
         network
             .node_mut(0)
             .behaviour_mut()
-            .broadcast(topic, msg.clone());
+            .broadcast(topic, msg.clone())
+            .unwrap();
     }
 
     // Node 1 should receive all of them
@@ -220,7 +223,8 @@ async fn test_burst_is_fully_delivered() {
                 network
                     .node_mut(0)
                     .behaviour_mut()
-                    .broadcast(topic, payload.clone());
+                    .broadcast(topic, payload.clone())
+                    .unwrap();
                 sent += 1;
             }
 

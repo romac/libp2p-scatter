@@ -42,7 +42,8 @@ impl Impl for Latest {
         b.subscribe(libp2p_scatter::Topic::new(TOPIC));
     }
     fn broadcast(b: &mut Self::B, payload: Bytes) {
-        b.broadcast(libp2p_scatter::Topic::new(TOPIC), payload);
+        b.broadcast(libp2p_scatter::Topic::new(TOPIC), payload)
+            .unwrap();
     }
     fn is_received(e: &libp2p_scatter::Event) -> bool {
         matches!(e, libp2p_scatter::Event::Received(..))

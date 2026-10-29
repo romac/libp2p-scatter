@@ -204,7 +204,8 @@ async fn test_broadcast_with_v03_peer() {
 
     pair.node
         .behaviour_mut()
-        .broadcast(Topic::new(b"topic"), Bytes::from_static(b"from node"));
+        .broadcast(Topic::new(b"topic"), Bytes::from_static(b"from node"))
+        .unwrap();
     pair.v03
         .behaviour_mut()
         .broadcast(&v03::Topic::new(b"topic"), Bytes::from_static(b"from v03"));
@@ -216,6 +217,43 @@ async fn test_broadcast_with_v03_peer() {
         }) && v03.iter().any(|e| {
             matches!(e, v03::Event::Received(p, t, m)
                 if *p == node_id && t.as_ref() == b"topic" && m.as_ref() == b"from node")
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_payload_of_max_message_size_with_v03_peer() {
+    const MAX_MESSAGE_SIZE: usize = 1024;
+    // The longest topic that the legacy protocol supports has the largest encoding overhead.
+    const TOPIC: &[u8] = &[b'x'; 63];
+
+    let config = Config::default()
+        .legacy_protocol(true)
+        .max_message_size(MAX_MESSAGE_SIZE);
+    let mut pair = Pair::new(config);
+    let (node_id, v03_id) = (pair.node_id(), pair.v03_id());
+
+    pair.connect().await;
+    pair.subscribe_both(TOPIC).await;
+
+    let payload = Bytes::from(vec![0xab; MAX_MESSAGE_SIZE]);
+    pair.node
+        .behaviour_mut()
+        .broadcast(Topic::new(TOPIC), payload.clone())
+        .unwrap();
+    pair.v03
+        .behaviour_mut()
+        .broadcast(&v03::Topic::new(TOPIC), payload.clone());
+
+    pair.wait_until(|node, v03| {
+        node.iter().any(|e| {
+            matches!(e, Event::Received(p, t, m)
+                if *p == v03_id && t.as_ref() == TOPIC && *m == payload)
+        }) && v03.iter().any(|e| {
+            matches!(e, v03::Event::Received(p, t, m)
+                if *p == node_id && t.as_ref() == TOPIC && *m == payload)
         })
     })
     .await;
@@ -259,7 +297,8 @@ async fn test_many_broadcasts_with_v03_peer() {
         let payload = Bytes::from(i.to_string());
         pair.node
             .behaviour_mut()
-            .broadcast(Topic::new(b"topic"), payload.clone());
+            .broadcast(Topic::new(b"topic"), payload.clone())
+            .unwrap();
         pair.v03
             .behaviour_mut()
             .broadcast(&v03::Topic::new(b"topic"), payload);
@@ -471,7 +510,8 @@ impl MixedNode {
                 .broadcast(&v03::Topic::new(UPGRADE_TOPIC), payload),
             NodeSwarm::Current(swarm) => swarm
                 .behaviour_mut()
-                .broadcast(Topic::new(UPGRADE_TOPIC), payload),
+                .broadcast(Topic::new(UPGRADE_TOPIC), payload)
+                .unwrap(),
         }
     }
 

@@ -217,13 +217,6 @@ impl Handler {
                             );
                             continue;
                         };
-                        if encoded.len() > self.config.max_message_size {
-                            warn!(
-                                topic = %message.topic(),
-                                "Dropping message: larger than the maximum message size"
-                            );
-                            continue;
-                        }
                         trace!(?message, "Requesting legacy substream for message");
                         self.legacy_substreams += 1;
                         return OutboundPollResult::RequestSubstream(OutboundProtocol::Legacy(
@@ -1367,41 +1360,6 @@ mod tests {
         }
         assert!(handler.pending_messages.is_empty());
         assert_eq!(handler.legacy_substreams, 1);
-    }
-
-    #[test]
-    fn test_legacy_mode_drops_message_above_max_size() {
-        let max_message_size = 64;
-        let mut handler = Handler {
-            outbound: OutboundState::Legacy,
-            ..Handler::new(Config::default().max_message_size(max_message_size))
-        };
-        let topic = Topic::new(b"topic");
-        let message = Message::Broadcast(topic, Bytes::from_static(b"small"));
-
-        handler.on_behaviour_event(Message::Broadcast(
-            topic,
-            Bytes::from(vec![0; max_message_size]),
-        ));
-        handler.on_behaviour_event(message.clone());
-
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        match handler.poll(&mut cx) {
-            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { protocol }) => {
-                match protocol.upgrade() {
-                    OutboundProtocol::Legacy(encoded) => {
-                        assert_eq!(*encoded, legacy::encode(&message).unwrap());
-                    }
-                    _ => panic!("Expected legacy upgrade"),
-                }
-            }
-            _ => panic!("Expected OutboundSubstreamRequest"),
-        }
-        assert!(handler.pending_messages.is_empty());
-        assert_eq!(handler.legacy_substreams, 1);
-        assert!(handler.pending_events.is_empty());
     }
 
     #[test]

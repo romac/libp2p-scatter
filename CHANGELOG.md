@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+#### Outbound messages
+
+* `Behaviour::broadcast` returns a `Result`. It returns `BroadcastError::PayloadTooLarge`, and sends nothing, when the payload is larger than `max_message_size`.
+
+#### Configuration
+
+* `max_message_size` limits the payload of a message, instead of the encoded message. The node accepts received messages up to `max_message_size` plus the largest size of a message header and topic, 76 bytes. This also applies to peers that use libp2p-scatter 0.3. A node that runs 0.4.1 with the same `max_message_size` still drops payloads within 76 bytes of the limit.
+
+### Fixed
+
+#### Metrics
+
+* Do not count a payload larger than `max_message_size` in the sent and published message metrics, as it is not sent.
+
 ## v0.4.1
 
 ### Added

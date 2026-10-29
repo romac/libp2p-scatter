@@ -84,12 +84,12 @@ fn decode(mut buf: BytesMut) -> io::Result<Message> {
 }
 
 /// Reads a single message from a substream, then closes it.
-pub(crate) async fn read_message<S>(socket: S, max_message_size: usize) -> io::Result<Message>
+pub(crate) async fn read_message<S>(socket: S, max_frame_size: usize) -> io::Result<Message>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut codec = UviBytes::<Bytes>::default();
-    codec.set_max_len(max_message_size);
+    codec.set_max_len(max_frame_size);
 
     let mut framed = FramedRead::new(socket, codec);
     let buf = framed

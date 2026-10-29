@@ -5,7 +5,7 @@ mod legacy;
 mod protocol;
 mod util;
 
-pub use behaviour::{Behaviour, Event};
+pub use behaviour::{Behaviour, BroadcastError, Event};
 pub use codec::Codec;
 pub use protocol::Topic;
 
@@ -23,10 +23,10 @@ pub struct Config {
     /// The protocol name used for substream negotiation.
     pub protocol_name: StreamProtocol,
 
-    /// Maximum size of an encoded message, in bytes, including its header and topic.
+    /// Maximum size of a message payload, in bytes.
     ///
-    /// The node drops the messages to send that exceed it,
-    /// and rejects the received messages that exceed it.
+    /// [`Behaviour::broadcast`] refuses a larger payload. The node rejects a received
+    /// message that is larger than this size plus the size of the message header and topic.
     pub max_message_size: usize,
 
     /// Maximum number of pending messages in the outbound queue of a connection.
@@ -48,7 +48,7 @@ impl Config {
         self
     }
 
-    /// Sets the maximum size of an encoded message, in bytes, including its header and topic.
+    /// Sets the maximum size of a message payload, in bytes.
     pub fn max_message_size(mut self, max_message_size: usize) -> Self {
         self.max_message_size = max_message_size;
         self
