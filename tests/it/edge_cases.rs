@@ -35,7 +35,8 @@ async fn test_empty_payload_broadcast() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(topic, payload.clone());
+        .broadcast(topic, payload.clone())
+        .unwrap();
 
     // Node 1 should still receive it
     let event = network
@@ -77,7 +78,8 @@ async fn test_large_payload_broadcast() {
     network
         .node_mut(0)
         .behaviour_mut()
-        .broadcast(topic, payload.clone());
+        .broadcast(topic, payload.clone())
+        .unwrap();
 
     // Node 1 should receive it
     let event = network

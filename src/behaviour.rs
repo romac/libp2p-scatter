@@ -27,6 +27,31 @@ pub enum Event {
     Received(PeerId, Topic, Bytes),
 }
 
+/// Error returned by [`Behaviour::broadcast`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BroadcastError {
+    /// The payload is larger than [`Config::max_message_size`].
+    PayloadTooLarge {
+        /// Size of the payload, in bytes.
+        size: usize,
+        /// Maximum size of a payload, in bytes.
+        max_size: usize,
+    },
+}
+
+impl fmt::Display for BroadcastError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PayloadTooLarge { size, max_size } => write!(
+                f,
+                "payload of {size} bytes exceeds the maximum message size of {max_size} bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BroadcastError {}
+
 /// Default maximum number of topics that a peer can subscribe to.
 const DEFAULT_MAX_TOPICS_PER_PEER: usize = 1024;
 
@@ -188,8 +213,22 @@ impl Behaviour {
     }
 
     /// Broadcast a message to all target peers subscribed to the given topic.
-    pub fn broadcast(&mut self, topic: Topic, payload: impl Into<Bytes>) {
+    ///
+    /// Returns an error, and sends nothing, if the payload is larger than
+    /// [`Config::max_message_size`].
+    pub fn broadcast(
+        &mut self,
+        topic: Topic,
+        payload: impl Into<Bytes>,
+    ) -> Result<(), BroadcastError> {
         let payload = payload.into();
+
+        if payload.len() > self.config.max_message_size {
+            return Err(BroadcastError::PayloadTooLarge {
+                size: payload.len(),
+                max_size: self.config.max_message_size,
+            });
+        }
 
         for (peer_id, sub_topic) in &self.connected_peers {
             // Peer must be subscribed to the topic.
@@ -213,6 +252,8 @@ impl Behaviour {
         if let Some(metrics) = &mut self.metrics {
             metrics.register_published_message(&topic);
         }
+
+        Ok(())
     }
 
     fn inject_connected(&mut self, peer: &PeerId) {
@@ -509,7 +550,7 @@ mod tests {
 
         fn broadcast(&self, topic: &Topic, msg: Bytes) {
             let mut me = self.behaviour.lock().unwrap();
-            me.broadcast(*topic, msg);
+            me.broadcast(*topic, msg).unwrap();
         }
     }
 
@@ -1210,6 +1251,92 @@ mod tests {
         // No events should be generated
         assert!(a.next().is_none());
         assert!(b.next().is_none());
+    }
+
+    #[test]
+    fn test_broadcast_above_max_message_size_is_refused() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut behaviour = Behaviour::new(Config::default().max_message_size(4));
+        behaviour.inject_connected(&peer);
+        receive(&mut behaviour, peer, Message::Subscribe(topic));
+        behaviour.events.clear();
+
+        let err = behaviour
+            .broadcast(topic, Bytes::from_static(b"12345"))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            BroadcastError::PayloadTooLarge {
+                size: 5,
+                max_size: 4
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "payload of 5 bytes exceeds the maximum message size of 4 bytes"
+        );
+        assert!(behaviour.events.is_empty());
+
+        assert_eq!(
+            behaviour.broadcast(topic, Bytes::from_static(b"1234")),
+            Ok(())
+        );
+        assert!(matches!(
+            behaviour.events.pop_front(),
+            Some(ToSwarm::NotifyHandler {
+                peer_id,
+                event: Message::Broadcast(t, payload),
+                ..
+            }) if peer_id == peer && t == topic && payload.as_ref() == b"1234"
+        ));
+        assert!(behaviour.events.is_empty());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_refused_broadcast_has_no_metrics() {
+        let topic = Topic::new(b"topic");
+        let peer = PeerId::random();
+
+        let mut registry = Registry::default();
+        let config = Config::default().max_message_size(4);
+        let mut behaviour = Behaviour::new_with_metrics(config, &mut registry);
+        behaviour.inject_connected(&peer);
+        receive(&mut behaviour, peer, Message::Subscribe(topic));
+
+        let encode = |registry: &Registry| {
+            let mut output = String::new();
+            prometheus_client::encoding::text::encode(&mut output, registry).unwrap();
+            output
+        };
+
+        behaviour
+            .broadcast(topic, Bytes::from_static(b"12345"))
+            .unwrap_err();
+        let output = encode(&registry);
+        assert!(
+            !output.contains("topic_msg_sent_counts_total{"),
+            "unexpected output: {output}"
+        );
+        assert!(
+            !output.contains("topic_msg_published_total{"),
+            "unexpected output: {output}"
+        );
+
+        behaviour
+            .broadcast(topic, Bytes::from_static(b"1234"))
+            .unwrap();
+        let output = encode(&registry);
+        assert!(
+            output.contains(r#"topic_msg_sent_counts_total{topic="topic"} 1"#),
+            "unexpected output: {output}"
+        );
+        assert!(
+            output.contains(r#"topic_msg_published_total{topic="topic"} 1"#),
+            "unexpected output: {output}"
+        );
     }
 
     #[test]

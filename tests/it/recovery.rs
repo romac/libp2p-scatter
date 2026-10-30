@@ -1,4 +1,4 @@
-//! Tests of how a node handles messages that it cannot send.
+//! Tests of how a node handles the maximum message size and messages that it cannot send.
 
 use std::time::Duration;
 
@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{SwarmBuilder, noise, tcp, yamux};
-use libp2p_scatter::{Behaviour, Config, Event, Topic};
+use libp2p_scatter::{Behaviour, BroadcastError, Config, Event, Topic};
 use tokio::time::timeout;
 
 const MAX_MESSAGE_SIZE: usize = 1024;
@@ -94,7 +94,8 @@ async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
 
     sender
         .behaviour_mut()
-        .broadcast(topic, Bytes::from(vec![0; 2 * MAX_MESSAGE_SIZE]));
+        .broadcast(topic, Bytes::from(vec![0; 2 * MAX_MESSAGE_SIZE]))
+        .unwrap();
 
     // Let the receiver drop its inbound stream.
     let _ = timeout(Duration::from_millis(500), async {
@@ -110,7 +111,8 @@ async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
     // Send a single message. Its write fails, and nothing else is sent after it.
     sender
         .behaviour_mut()
-        .broadcast(topic, Bytes::from_static(b"msg"));
+        .broadcast(topic, Bytes::from_static(b"msg"))
+        .unwrap();
 
     timeout(Duration::from_secs(10), async {
         loop {
@@ -135,27 +137,31 @@ async fn test_subscriptions_are_sent_again_after_the_outbound_stream_fails() {
 
 #[tokio::test]
 #[test_log::test]
-async fn test_messages_above_max_size_are_dropped_without_closing_the_stream() {
-    let topic = Topic::new(b"topic");
+async fn test_payload_up_to_max_message_size_is_received() {
+    // The longest topic has the largest encoding overhead.
+    let topic = Topic::new(&[b'x'; Topic::MAX_LENGTH]);
+    let config = Config::default().max_message_size(MAX_MESSAGE_SIZE);
 
-    let (mut sender, mut receiver) = subscribed_pair(
-        Config::default().max_message_size(MAX_MESSAGE_SIZE),
-        Config::default(),
-        topic,
-    )
-    .await;
+    let (mut sender, mut receiver) = subscribed_pair(config.clone(), config, topic).await;
     let sender_id = *sender.local_peer_id();
-    let receiver_id = *receiver.local_peer_id();
 
-    // More messages than the failed sends in a row after which a connection is closed.
-    for _ in 0..10 {
-        sender
-            .behaviour_mut()
-            .broadcast(topic, Bytes::from(vec![0; 2 * MAX_MESSAGE_SIZE]));
-    }
+    let err = sender
+        .behaviour_mut()
+        .broadcast(topic, Bytes::from(vec![0xab; MAX_MESSAGE_SIZE + 1]))
+        .unwrap_err();
+    assert_eq!(
+        err,
+        BroadcastError::PayloadTooLarge {
+            size: MAX_MESSAGE_SIZE + 1,
+            max_size: MAX_MESSAGE_SIZE
+        }
+    );
+
+    let payload = Bytes::from(vec![0xab; MAX_MESSAGE_SIZE]);
     sender
         .behaviour_mut()
-        .broadcast(topic, Bytes::from_static(b"msg"));
+        .broadcast(topic, payload.clone())
+        .unwrap();
 
     let received = timeout(Duration::from_secs(10), async {
         loop {
@@ -172,6 +178,5 @@ async fn test_messages_above_max_size_are_dropped_without_closing_the_stream() {
     .await
     .expect("The receiver did not receive the message");
 
-    assert_eq!(received, (sender_id, topic, Bytes::from_static(b"msg")));
-    assert!(sender.is_connected(&receiver_id));
+    assert_eq!(received, (sender_id, topic, payload));
 }

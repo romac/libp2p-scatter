@@ -33,7 +33,7 @@ let mut behaviour = Behaviour::new(Config::default());
 behaviour.subscribe(Topic::new(b"announcements"));
 
 // Broadcast messages
-behaviour.broadcast(&topic, Bytes::from("Hello!"));
+behaviour.broadcast(topic, Bytes::from("Hello!"))?;
 
 // Query subscriptions
 for topic in behaviour.subscribed() {
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Broadcast a message when a peer subscribes
                 let message = Bytes::from("Hello, peer!");
-                swarm.behaviour_mut().broadcast(&topic, message);
+                swarm.behaviour_mut().broadcast(topic, message)?;
             }
             SwarmEvent::Behaviour(scatter::Event::Unsubscribed(peer_id, topic)) => {
                 println!("Peer {peer_id} unsubscribed from topic: {topic}");

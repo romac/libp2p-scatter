@@ -12,9 +12,15 @@ use libp2p::{InboundUpgrade, OutboundUpgrade, StreamProtocol};
 use crate::util::BytesRef;
 use crate::{Codec, Config, legacy};
 
+/// Maximum size of an encoded message, minus the size of its payload:
+/// the tag, the topic length, the topic, and the varint length of the payload.
+/// It is larger than the header and topic of a legacy message.
+const MAX_FRAME_OVERHEAD: usize = 2 + Topic::MAX_LENGTH + 10;
+
 pub struct ProtocolConfig {
     pub protocol_name: StreamProtocol,
-    pub max_message_size: usize,
+    /// Maximum size of an encoded message, without its length prefix.
+    pub max_frame_size: usize,
     pub legacy_protocol: bool,
 }
 
@@ -22,7 +28,7 @@ impl From<&Config> for ProtocolConfig {
     fn from(config: &Config) -> Self {
         Self {
             protocol_name: config.protocol_name.clone(),
-            max_message_size: config.max_message_size,
+            max_frame_size: config.max_message_size.saturating_add(MAX_FRAME_OVERHEAD),
             legacy_protocol: config.legacy_protocol,
         }
     }
@@ -65,12 +71,12 @@ where
 
     fn upgrade_inbound(self, socket: S, info: Self::Info) -> Self::Future {
         if info == legacy::PROTOCOL_NAME {
-            return legacy::read_message(socket, self.max_message_size)
+            return legacy::read_message(socket, self.max_frame_size)
                 .map(|message| message.map(Inbound::Legacy))
                 .boxed();
         }
 
-        let codec = Codec::new().with_max_size(self.max_message_size);
+        let codec = Codec::new().with_max_size(self.max_frame_size);
         future::ok(Inbound::Stream(FramedRead::new(socket, codec))).boxed()
     }
 }
@@ -123,7 +129,7 @@ where
             }
             .boxed(),
             Self::Stream(config) => {
-                let codec = Codec::new().with_max_size(config.max_message_size);
+                let codec = Codec::new().with_max_size(config.max_frame_size);
                 future::ok(Outbound::Stream(FramedWrite::new(socket, codec))).boxed()
             }
             Self::Legacy(message) => async move {
