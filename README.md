@@ -18,6 +18,7 @@ Use the release line that matches the version of libp2p in your application.
 
 | libp2p-scatter | libp2p |
 |----------------|--------|
+| 0.6.x          | 0.57   |
 | 0.5.x          | 0.56   |
 | 0.4.x          | 0.56   |
 | 0.3.x          | 0.56   |

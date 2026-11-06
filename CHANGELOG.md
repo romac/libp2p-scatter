@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+* **chore**: Update `libp2p` dependency to `v0.57.x`.
+* **metrics**: Update `prometheus-client` dependency to `v0.25.x`.
+
 ## v0.5.0
 
 ### Breaking Changes
