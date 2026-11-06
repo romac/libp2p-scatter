@@ -49,6 +49,8 @@ jobs:
           tool: cargo-nextest
       - name: Run tests
         run: cargo nextest run --all-features --no-fail-fast
+      - name: Run doctests
+        run: cargo test --doc --all-features
 
   msrv:
     name: MSRV

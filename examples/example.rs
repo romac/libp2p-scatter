@@ -58,7 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Peer {peer_id} subscribed to topic: {topic}");
 
                 let message = Bytes::from(format!("A new peer has joined: {peer_id}!"));
-                swarm.behaviour_mut().broadcast(topic, message)?;
+                if let Err(e) = swarm.behaviour_mut().broadcast(topic, message) {
+                    eprintln!("Failed to broadcast: {e}");
+                }
             }
             SwarmEvent::Behaviour(scatter::Event::Unsubscribed(peer_id, topic)) => {
                 println!("Peer {peer_id} unsubscribed from topic: {topic}");

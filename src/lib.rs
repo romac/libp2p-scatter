@@ -14,6 +14,11 @@ use libp2p::swarm::StreamProtocol;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 
+/// Compiles the code examples in the README as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 /// Default protocol name for the scatter protocol.
 const DEFAULT_PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter/1.0.0");
 

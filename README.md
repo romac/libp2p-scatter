@@ -29,14 +29,20 @@ Use the release line that matches the version of libp2p in your application.
 ## API Overview
 
 ```rust
+use bytes::Bytes;
+use libp2p_scatter::{Behaviour, Config, Topic};
+
 // Create behaviour
 let mut behaviour = Behaviour::new(Config::default());
 
 // Subscribe to topics
-behaviour.subscribe(Topic::new(b"announcements"));
+let topic = Topic::new(b"announcements");
+behaviour.subscribe(topic);
 
-// Broadcast messages
-behaviour.broadcast(topic, Bytes::from("Hello!"))?;
+// Broadcast messages, which fails if the payload is larger than `max_message_size`
+if let Err(e) = behaviour.broadcast(topic, Bytes::from("Hello!")) {
+    eprintln!("Failed to broadcast: {e}");
+}
 
 // Query subscriptions
 for topic in behaviour.subscribed() {
@@ -44,16 +50,14 @@ for topic in behaviour.subscribed() {
 }
 
 // Query peers on a topic
-if let Some(peers) = behaviour.peers(&topic) {
-    for peer in peers {
-        println!("Peer: {peer}");
-    }
+for peer in behaviour.peers(topic) {
+    println!("Peer: {peer}");
 }
 ```
 
 ## Example
 
-```rust
+```rust,no_run
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, identity, noise, tcp, yamux};
@@ -96,14 +100,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Listen on a local address
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
+    let topic = scatter::Topic::new(b"my-topic");
+
     if let Some(addr) = connect_addr {
         swarm.dial(addr.clone())?;
         println!("Dialed {addr}");
     }
 
     // Subscribe to a topic
-    let topic = scatter::Topic::new(b"my-topic");
     swarm.behaviour_mut().subscribe(topic);
+    println!("Subscribed to topic: {topic}");
 
     // Event loop
     loop {
@@ -111,9 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SwarmEvent::Behaviour(scatter::Event::Subscribed(peer_id, topic)) => {
                 println!("Peer {peer_id} subscribed to topic: {topic}");
 
-                // Broadcast a message when a peer subscribes
-                let message = Bytes::from("Hello, peer!");
-                swarm.behaviour_mut().broadcast(topic, message)?;
+                let message = Bytes::from(format!("A new peer has joined: {peer_id}!"));
+                if let Err(e) = swarm.behaviour_mut().broadcast(topic, message) {
+                    eprintln!("Failed to broadcast: {e}");
+                }
             }
             SwarmEvent::Behaviour(scatter::Event::Unsubscribed(peer_id, topic)) => {
                 println!("Peer {peer_id} unsubscribed from topic: {topic}");
