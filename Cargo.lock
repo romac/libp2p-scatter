@@ -2174,6 +2174,20 @@ dependencies = [
 
 [[package]]
 name = "libp2p-scatter"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5998751496490654959623b86fb73dd89078e18c7d40620276fb6a6083177c0"
+dependencies = [
+ "asynchronous-codec",
+ "bytes",
+ "futures",
+ "libp2p 0.56.0",
+ "tracing",
+ "unsigned-varint 0.8.0",
+]
+
+[[package]]
+name = "libp2p-scatter"
 version = "0.6.0-pre"
 dependencies = [
  "asynchronous-codec",
@@ -2182,6 +2196,7 @@ dependencies = [
  "libp2p 0.56.0",
  "libp2p 0.57.0",
  "libp2p-scatter 0.3.0",
+ "libp2p-scatter 0.5.0",
  "prometheus-client 0.25.2",
  "test-log",
  "tokio",

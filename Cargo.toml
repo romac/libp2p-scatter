@@ -27,7 +27,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libp2p = { version = "0.57", features = ["tcp", "noise", "yamux", "tokio", "metrics"] }
 test-log = { version = "0.2.19", default-features = false, features = ["color", "trace"] }
 libp2p-scatter-v03 = { package = "libp2p-scatter", version = "=0.3.0" }
-# libp2p version that libp2p-scatter 0.3 uses
+libp2p-scatter-v05 = { package = "libp2p-scatter", version = "=0.5.0" }
+# libp2p version that libp2p-scatter 0.3 and 0.5 use
 libp2p-v056 = { package = "libp2p", version = "0.56", features = ["tcp", "noise", "yamux", "tokio"] }
 prometheus-client = "0.25.2"
 
