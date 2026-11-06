@@ -4,26 +4,95 @@
 //! Run all scenarios with `cargo bench --bench throughput`, or only the scenarios
 //! whose name contains a filter with `cargo bench --bench throughput -- <filter>`.
 
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::StreamExt;
-use libp2p::identity::Keypair;
-use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{Multiaddr, SwarmBuilder, noise, tcp, yamux};
+use libp2p_v056 as libp2p_v03;
 use tokio::sync::mpsc;
 
 const TOPIC: &[u8] = b"bench";
 const WINDOW: usize = 256;
 const RUNS: usize = 5;
 
+/// The events of a swarm that the benchmark uses, for any version of libp2p.
+enum NodeEvent {
+    Listening(String),
+    Received,
+    Subscribed,
+    Closed(String),
+    Other,
+}
+
 trait Impl: Clone + Send + 'static {
-    type B: NetworkBehaviour<ToSwarm: Send + std::fmt::Debug> + Send;
+    type B;
+    type Swarm: Send + 'static;
     fn behaviour(&self) -> Self::B;
     fn subscribe(b: &mut Self::B);
     fn broadcast(b: &mut Self::B, payload: Bytes);
-    fn is_received(e: &<Self::B as NetworkBehaviour>::ToSwarm) -> bool;
-    fn is_subscribed(e: &<Self::B as NetworkBehaviour>::ToSwarm) -> bool;
+    fn swarm(&self) -> Self::Swarm;
+    fn behaviour_mut(swarm: &mut Self::Swarm) -> &mut Self::B;
+    fn listen(swarm: &mut Self::Swarm);
+    fn dial(swarm: &mut Self::Swarm, addr: &str);
+    fn next_event(swarm: &mut Self::Swarm) -> impl Future<Output = NodeEvent> + Send;
+}
+
+/// Implements the items of `Impl` that have the same code for each version of libp2p.
+macro_rules! swarm_items {
+    ($libp2p:ident, $scatter:ident) => {
+        type B = $scatter::Behaviour;
+        type Swarm = $libp2p::Swarm<Self::B>;
+
+        fn swarm(&self) -> Self::Swarm {
+            let behaviour = self.behaviour();
+            $libp2p::SwarmBuilder::with_existing_identity(
+                $libp2p::identity::Keypair::generate_ed25519(),
+            )
+            .with_tokio()
+            .with_tcp(
+                $libp2p::tcp::Config::default().nodelay(true),
+                $libp2p::noise::Config::new,
+                $libp2p::yamux::Config::default,
+            )
+            .unwrap()
+            .with_behaviour(|_| behaviour)
+            .unwrap()
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
+            .build()
+        }
+
+        fn behaviour_mut(swarm: &mut Self::Swarm) -> &mut Self::B {
+            swarm.behaviour_mut()
+        }
+
+        fn listen(swarm: &mut Self::Swarm) {
+            swarm
+                .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+                .unwrap();
+        }
+
+        fn dial(swarm: &mut Self::Swarm, addr: &str) {
+            swarm
+                .dial(addr.parse::<$libp2p::Multiaddr>().unwrap())
+                .unwrap();
+        }
+
+        async fn next_event(swarm: &mut Self::Swarm) -> NodeEvent {
+            use $libp2p::swarm::SwarmEvent;
+            match swarm.select_next_some().await {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    NodeEvent::Listening(address.to_string())
+                }
+                SwarmEvent::Behaviour($scatter::Event::Received(..)) => NodeEvent::Received,
+                SwarmEvent::Behaviour($scatter::Event::Subscribed(..)) => NodeEvent::Subscribed,
+                SwarmEvent::ConnectionClosed { cause, .. } => {
+                    NodeEvent::Closed(format!("{cause:?}"))
+                }
+                _ => NodeEvent::Other,
+            }
+        }
+    };
 }
 
 #[derive(Clone)]
@@ -32,7 +101,8 @@ struct Latest {
 }
 
 impl Impl for Latest {
-    type B = libp2p_scatter::Behaviour;
+    swarm_items!(libp2p, libp2p_scatter);
+
     fn behaviour(&self) -> Self::B {
         libp2p_scatter::Behaviour::new(
             libp2p_scatter::Config::default().legacy_protocol(self.legacy),
@@ -45,19 +115,14 @@ impl Impl for Latest {
         b.broadcast(libp2p_scatter::Topic::new(TOPIC), payload)
             .unwrap();
     }
-    fn is_received(e: &libp2p_scatter::Event) -> bool {
-        matches!(e, libp2p_scatter::Event::Received(..))
-    }
-    fn is_subscribed(e: &libp2p_scatter::Event) -> bool {
-        matches!(e, libp2p_scatter::Event::Subscribed(..))
-    }
 }
 
 #[derive(Clone)]
 struct V03;
 
 impl Impl for V03 {
-    type B = libp2p_scatter_v03::Behaviour;
+    swarm_items!(libp2p_v03, libp2p_scatter_v03);
+
     fn behaviour(&self) -> Self::B {
         libp2p_scatter_v03::Behaviour::new(libp2p_scatter_v03::Config::default())
     }
@@ -67,54 +132,30 @@ impl Impl for V03 {
     fn broadcast(b: &mut Self::B, payload: Bytes) {
         b.broadcast(&libp2p_scatter_v03::Topic::new(TOPIC), payload);
     }
-    fn is_received(e: &libp2p_scatter_v03::Event) -> bool {
-        matches!(e, libp2p_scatter_v03::Event::Received(..))
-    }
-    fn is_subscribed(e: &libp2p_scatter_v03::Event) -> bool {
-        matches!(e, libp2p_scatter_v03::Event::Subscribed(..))
-    }
-}
-
-fn build_swarm<B: NetworkBehaviour>(behaviour: B) -> Swarm<B> {
-    SwarmBuilder::with_existing_identity(Keypair::generate_ed25519())
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default().nodelay(true),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .unwrap()
-        .with_behaviour(|_| behaviour)
-        .unwrap()
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
-        .build()
 }
 
 /// A connected sender/receiver pair. The receiver runs in its own task and
 /// reports each received message on `rx`.
 struct Pair<S: Impl> {
-    sender: Swarm<S::B>,
+    sender: S::Swarm,
     rx: mpsc::UnboundedReceiver<Instant>,
 }
 
 impl<S: Impl> Pair<S> {
     async fn new<R: Impl>(s: S, r: R) -> Self {
-        let mut receiver = build_swarm(r.behaviour());
-        receiver
-            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-            .unwrap();
-        let addr: Multiaddr = loop {
-            if let SwarmEvent::NewListenAddr { address, .. } = receiver.select_next_some().await {
+        let mut receiver = r.swarm();
+        R::listen(&mut receiver);
+        let addr = loop {
+            if let NodeEvent::Listening(address) = R::next_event(&mut receiver).await {
                 break address;
             }
         };
-        R::subscribe(receiver.behaviour_mut());
+        R::subscribe(R::behaviour_mut(&mut receiver));
 
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
-                if let SwarmEvent::Behaviour(e) = receiver.select_next_some().await
-                    && R::is_received(&e)
+                if matches!(R::next_event(&mut receiver).await, NodeEvent::Received)
                     && tx.send(Instant::now()).is_err()
                 {
                     return;
@@ -122,13 +163,13 @@ impl<S: Impl> Pair<S> {
             }
         });
 
-        let mut sender = build_swarm(s.behaviour());
-        S::subscribe(sender.behaviour_mut());
-        sender.dial(addr).unwrap();
+        let mut sender = s.swarm();
+        S::subscribe(S::behaviour_mut(&mut sender));
+        S::dial(&mut sender, &addr);
         loop {
-            match sender.select_next_some().await {
-                SwarmEvent::Behaviour(e) if S::is_subscribed(&e) => break,
-                SwarmEvent::ConnectionClosed { cause, .. } => panic!("closed: {cause:?}"),
+            match S::next_event(&mut sender).await {
+                NodeEvent::Subscribed => break,
+                NodeEvent::Closed(cause) => panic!("closed: {cause}"),
                 _ => {}
             }
         }
@@ -138,7 +179,7 @@ impl<S: Impl> Pair<S> {
         loop {
             tokio::select! {
                 _ = &mut settle => break,
-                _ = sender.select_next_some() => {}
+                _ = S::next_event(&mut sender) => {}
             }
         }
         Self { sender, rx }
@@ -156,14 +197,14 @@ impl<S: Impl> Pair<S> {
         tokio::pin!(deadline);
         while received < n {
             while sent < n && sent - received < window {
-                S::broadcast(self.sender.behaviour_mut(), payload.clone());
+                S::broadcast(S::behaviour_mut(&mut self.sender), payload.clone());
                 send_times.push_back(Instant::now());
                 sent += 1;
             }
             tokio::select! {
-                ev = self.sender.select_next_some() => {
-                    if let SwarmEvent::ConnectionClosed { cause, .. } = ev {
-                        panic!("closed: {cause:?}");
+                ev = S::next_event(&mut self.sender) => {
+                    if let NodeEvent::Closed(cause) = ev {
+                        panic!("closed: {cause}");
                     }
                 }
                 Some(at) = self.rx.recv() => {
