@@ -48,6 +48,23 @@ jobs:
       - name: Run tests
         run: cargo nextest run --all-features --no-fail-fast
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-msrv
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-msrv@0.20.0-beta.4
+      # The default check is ambiguous, because the dev-dependencies include
+      # older versions of this package.
+      - name: Verify MSRV
+        run: cargo msrv verify -- cargo check --all-features --all-targets
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
