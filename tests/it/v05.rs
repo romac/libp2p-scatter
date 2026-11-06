@@ -1,25 +1,32 @@
 //! Tests for exchanging messages with peers running libp2p-scatter 0.5, the upgrade path from the
 //! previous release line.
 //!
-//! libp2p-scatter 0.5 uses libp2p 0.56, so the 0.5 nodes have their own libp2p types. The
-//! `legacy_protocol` option is off by default on both nodes, so these tests only pass if the nodes
-//! can communicate on the current protocol across the two libp2p versions.
+//! libp2p-scatter 0.5 uses libp2p 0.56, so the 0.5 nodes have their own libp2p types.
+//!
+//! Nodes that share the current protocol must use it, whether `legacy_protocol` is on or not.
+//! Nodes that only share the legacy protocol must fall back to it.
 
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::{Multiaddr, PeerId};
-use libp2p_scatter::{Behaviour, Event, Topic};
+use libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder, noise, tcp, yamux};
+#[cfg(feature = "metrics")]
+use libp2p_scatter::metrics::Registry;
+use libp2p_scatter::{Behaviour, Config, Event, Topic};
 use libp2p_scatter_v05 as v05;
 use libp2p_v056 as libp2p_v05;
 use tokio::time::timeout;
 
-use crate::common::{create_listening_swarm, create_swarm};
+#[cfg(feature = "metrics")]
+use super::legacy::legacy_connections;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const TOPIC: &[u8] = b"topic";
+
+/// A protocol name that libp2p-scatter 0.5 does not use by default.
+const OTHER_PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/me.romac/scatter-test/1.0.0");
 
 /// The payload size and number of messages to send at once. The number of messages stays below
 /// the default `max_outbound_queue_size`, above which a node drops messages.
@@ -40,7 +47,22 @@ fn from_v05_addr(addr: libp2p_v05::Multiaddr) -> Multiaddr {
     addr.to_string().parse().expect("Invalid address")
 }
 
-fn build_v05_swarm() -> V05Swarm {
+fn build_swarm(behaviour: Behaviour) -> Swarm<Behaviour> {
+    SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .expect("Failed to create TCP transport")
+        .with_behaviour(|_| behaviour)
+        .expect("Failed to create behaviour")
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build()
+}
+
+fn build_v05_swarm(config: v05::Config) -> V05Swarm {
     libp2p_v05::SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(
@@ -49,10 +71,23 @@ fn build_v05_swarm() -> V05Swarm {
             libp2p_v05::yamux::Config::default,
         )
         .expect("Failed to create TCP transport")
-        .with_behaviour(|_| v05::Behaviour::new(v05::Config::default()))
+        .with_behaviour(|_| v05::Behaviour::new(config))
         .expect("Failed to create behaviour")
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build()
+}
+
+/// Starts listening on a random local port, and returns the listen address.
+async fn listen(swarm: &mut Swarm<Behaviour>) -> Multiaddr {
+    swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .expect("Failed to start listening");
+
+    loop {
+        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+            return address;
+        }
+    }
 }
 
 /// Starts listening on a random local port, and returns the listen address.
@@ -74,6 +109,10 @@ fn payload(seq: usize, size: usize) -> Bytes {
     let len = size.min(size_of::<u64>());
     payload[..len].copy_from_slice(&(seq as u64).to_le_bytes()[..len]);
     Bytes::from(payload)
+}
+
+fn payloads(size: usize, count: usize) -> Vec<Bytes> {
+    (0..count).map(|seq| payload(seq, size)).collect()
 }
 
 /// The messages that the node received from the sender on `TOPIC`.
@@ -102,6 +141,11 @@ fn v05_messages(events: &[v05::Event], sender: PeerId) -> Vec<Bytes> {
         .collect()
 }
 
+fn sorted(mut messages: Vec<Bytes>) -> Vec<Bytes> {
+    messages.sort();
+    messages
+}
+
 /// The node that opens the connection.
 #[derive(Clone, Copy, Debug)]
 enum Dialer {
@@ -111,6 +155,61 @@ enum Dialer {
 
 const DIALERS: [Dialer; 2] = [Dialer::Node, Dialer::V05];
 
+/// Two nodes that share the current protocol.
+#[derive(Clone, Copy, Debug)]
+struct Scenario {
+    dialer: Dialer,
+    /// `Config::legacy_protocol` on the node.
+    node_legacy: bool,
+    /// `Config::legacy_protocol` on the 0.5 node.
+    v05_legacy: bool,
+}
+
+impl Scenario {
+    /// Each combination of the dialer and of `legacy_protocol` on the two nodes.
+    fn all() -> impl Iterator<Item = Self> {
+        DIALERS.into_iter().flat_map(|dialer| {
+            [(false, false), (true, false), (false, true), (true, true)].map(
+                |(node_legacy, v05_legacy)| Self {
+                    dialer,
+                    node_legacy,
+                    v05_legacy,
+                },
+            )
+        })
+    }
+
+    fn config(self) -> Config {
+        Config::default().legacy_protocol(self.node_legacy)
+    }
+
+    fn v05_config(self) -> v05::Config {
+        v05::Config::default().legacy_protocol(self.v05_legacy)
+    }
+
+    async fn pair(self) -> Pair {
+        tracing::info!(scenario = ?self, "Starting scenario");
+        Pair::new(
+            self.dialer,
+            Behaviour::new(self.config()),
+            self.v05_config(),
+        )
+        .await
+    }
+}
+
+/// The configuration of a node that only shares the legacy protocol with a 0.5 node that has the
+/// configuration of [`fallback_v05_config`].
+fn fallback_config() -> Config {
+    Config::default()
+        .protocol_name(OTHER_PROTOCOL_NAME)
+        .legacy_protocol(true)
+}
+
+fn fallback_v05_config() -> v05::Config {
+    v05::Config::default().legacy_protocol(true)
+}
+
 /// A node running the current version and a node running libp2p-scatter 0.5.
 struct Pair {
     node: Swarm<Behaviour>,
@@ -118,22 +217,20 @@ struct Pair {
 }
 
 impl Pair {
-    async fn new(dialer: Dialer) -> Self {
-        let mut v05 = build_v05_swarm();
+    async fn new(dialer: Dialer, behaviour: Behaviour, v05_config: v05::Config) -> Self {
+        let mut node = build_swarm(behaviour);
+        let mut v05 = build_v05_swarm(v05_config);
 
-        let node = match dialer {
+        match dialer {
             Dialer::Node => {
                 let addr = listen_v05(&mut v05).await;
-                let mut node = create_swarm();
                 node.dial(addr).expect("Failed to dial");
-                node
             }
             Dialer::V05 => {
-                let (node, addr) = create_listening_swarm().await;
+                let addr = listen(&mut node).await;
                 v05.dial(v05_addr(addr)).expect("Failed to dial");
-                node
             }
-        };
+        }
 
         Self { node, v05 }
     }
@@ -198,13 +295,49 @@ impl Pair {
         })
         .await;
     }
+
+    /// Broadcasts the payloads from the node, and returns the messages that the 0.5 node received.
+    async fn send_from_node(&mut self, payloads: &[Bytes]) -> Vec<Bytes> {
+        let node_id = self.node_id();
+
+        for payload in payloads {
+            self.node
+                .behaviour_mut()
+                .broadcast(Topic::new(TOPIC), payload.clone())
+                .unwrap();
+        }
+
+        let (_, events) = self
+            .wait_until(|_, v05| v05_messages(v05, node_id).len() >= payloads.len())
+            .await;
+
+        v05_messages(&events, node_id)
+    }
+
+    /// Broadcasts the payloads from the 0.5 node, and returns the messages that the node received.
+    async fn send_from_v05(&mut self, payloads: &[Bytes]) -> Vec<Bytes> {
+        let v05_id = self.v05_id();
+
+        for payload in payloads {
+            self.v05
+                .behaviour_mut()
+                .broadcast(v05::Topic::new(TOPIC), payload.clone())
+                .unwrap();
+        }
+
+        let (events, _) = self
+            .wait_until(|node, _| messages(node, v05_id).len() >= payloads.len())
+            .await;
+
+        messages(&events, v05_id)
+    }
 }
 
 #[tokio::test]
 #[test_log::test]
 async fn test_subscriptions_with_v05_peer() {
-    for dialer in DIALERS {
-        let mut pair = Pair::new(dialer).await;
+    for scenario in Scenario::all() {
+        let mut pair = scenario.pair().await;
 
         pair.subscribe_both().await;
     }
@@ -213,41 +346,22 @@ async fn test_subscriptions_with_v05_peer() {
 #[tokio::test]
 #[test_log::test]
 async fn test_broadcast_with_v05_peer() {
-    for dialer in DIALERS {
-        let mut pair = Pair::new(dialer).await;
-        let (node_id, v05_id) = (pair.node_id(), pair.v05_id());
+    for scenario in Scenario::all() {
+        let mut pair = scenario.pair().await;
 
         pair.subscribe_both().await;
 
         for &(size, count) in LOADS {
-            let expected: Vec<Bytes> = (0..count).map(|seq| payload(seq, size)).collect();
+            let expected = payloads(size, count);
 
-            for message in &expected {
-                pair.node
-                    .behaviour_mut()
-                    .broadcast(Topic::new(TOPIC), message.clone())
-                    .unwrap();
-            }
-            let (_, events) = pair
-                .wait_until(|_, v05| v05_messages(v05, node_id).len() >= count)
-                .await;
+            // The current protocol keeps the order of the messages.
             assert!(
-                v05_messages(&events, node_id) == expected,
-                "{dialer:?} dials: wrong messages of {size} bytes from node to 0.5 node"
+                pair.send_from_node(&expected).await == expected,
+                "{scenario:?}: wrong messages of {size} bytes from node to 0.5 node"
             );
-
-            for message in &expected {
-                pair.v05
-                    .behaviour_mut()
-                    .broadcast(v05::Topic::new(TOPIC), message.clone())
-                    .unwrap();
-            }
-            let (events, _) = pair
-                .wait_until(|node, _| messages(node, v05_id).len() >= count)
-                .await;
             assert!(
-                messages(&events, v05_id) == expected,
-                "{dialer:?} dials: wrong messages of {size} bytes from 0.5 node to node"
+                pair.send_from_v05(&expected).await == expected,
+                "{scenario:?}: wrong messages of {size} bytes from 0.5 node to node"
             );
         }
     }
@@ -256,8 +370,8 @@ async fn test_broadcast_with_v05_peer() {
 #[tokio::test]
 #[test_log::test]
 async fn test_unsubscribe_with_v05_peer() {
-    for dialer in DIALERS {
-        let mut pair = Pair::new(dialer).await;
+    for scenario in Scenario::all() {
+        let mut pair = scenario.pair().await;
         let (node_id, v05_id) = (pair.node_id(), pair.v05_id());
 
         pair.subscribe_both().await;
@@ -277,5 +391,64 @@ async fn test_unsubscribe_with_v05_peer() {
             )
         })
         .await;
+    }
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn test_legacy_fallback_with_v05_peer() {
+    for dialer in DIALERS {
+        let behaviour = Behaviour::new(fallback_config());
+        let mut pair = Pair::new(dialer, behaviour, fallback_v05_config()).await;
+
+        pair.subscribe_both().await;
+
+        for &(size, count) in LOADS {
+            let expected = sorted(payloads(size, count));
+
+            // Messages sent on separate legacy substreams can arrive in any order.
+            assert!(
+                sorted(pair.send_from_node(&expected).await) == expected,
+                "{dialer:?} dials: wrong messages of {size} bytes from node to 0.5 node"
+            );
+            assert!(
+                sorted(pair.send_from_v05(&expected).await) == expected,
+                "{dialer:?} dials: wrong messages of {size} bytes from 0.5 node to node"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+#[tokio::test]
+#[test_log::test]
+async fn test_no_legacy_fallback_when_v05_peer_shares_current_protocol() {
+    for scenario in Scenario::all() {
+        let mut registry = Registry::default();
+        let behaviour = Behaviour::new_with_metrics(scenario.config(), &mut registry);
+        let mut pair = Pair::new(scenario.dialer, behaviour, scenario.v05_config()).await;
+
+        pair.subscribe_both().await;
+
+        let expected = payloads(64, 10);
+        pair.send_from_node(&expected).await;
+        pair.send_from_v05(&expected).await;
+
+        assert_eq!(legacy_connections(&registry), 0, "{scenario:?}");
+    }
+}
+
+#[cfg(feature = "metrics")]
+#[tokio::test]
+#[test_log::test]
+async fn test_metrics_count_legacy_fallback_with_v05_peer() {
+    for dialer in DIALERS {
+        let mut registry = Registry::default();
+        let behaviour = Behaviour::new_with_metrics(fallback_config(), &mut registry);
+        let mut pair = Pair::new(dialer, behaviour, fallback_v05_config()).await;
+
+        pair.subscribe_both().await;
+
+        assert_eq!(legacy_connections(&registry), 1, "{dialer:?} dials");
     }
 }

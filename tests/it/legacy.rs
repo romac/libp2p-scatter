@@ -47,7 +47,7 @@ fn v03_keypair(keypair: &Keypair) -> libp2p_v03::identity::Keypair {
 
 /// Returns the value of the `legacy_connections` metric.
 #[cfg(feature = "metrics")]
-fn legacy_connections(registry: &Registry) -> u64 {
+pub(super) fn legacy_connections(registry: &Registry) -> u64 {
     let mut text = String::new();
     prometheus_client::encoding::text::encode(&mut text, registry)
         .expect("Failed to encode metrics");
