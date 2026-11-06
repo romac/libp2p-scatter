@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "libp2p-scatter"
-version = "0.6.0-pre"
+version = "0.6.0"
 dependencies = [
  "asynchronous-codec",
  "bytes",
