@@ -17,18 +17,19 @@ futures = "0.3"
 libp2p = "0.57"
 unsigned-varint = { version = "0.8", features = ["asynchronous_codec"] }
 tracing = "0.1"
-prometheus-client = { version = "0.23.1", optional = true }
+# 0.25.2 is the first version that escapes label values
+prometheus-client = { version = "0.25.2", optional = true }
 asynchronous-codec = "0.7.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-libp2p = { version = "0.57", features = ["tcp", "noise", "yamux", "tokio"] }
+libp2p = { version = "0.57", features = ["tcp", "noise", "yamux", "tokio", "metrics"] }
 test-log = { version = "0.2.19", default-features = false, features = ["color", "trace"] }
 libp2p-scatter-v03 = { package = "libp2p-scatter", version = "=0.3.0" }
 # libp2p version that libp2p-scatter 0.3 uses
 libp2p-v056 = { package = "libp2p", version = "0.56", features = ["tcp", "noise", "yamux", "tokio"] }
-prometheus-client = "0.23.1"
+prometheus-client = "0.25.2"
 
 [[bench]]
 name = "throughput"

@@ -196,7 +196,7 @@ impl Metrics {
 }
 
 impl EncodeLabelSet for Topic {
-    fn encode(&self, mut encoder: LabelSetEncoder) -> fmt::Result {
+    fn encode(&self, encoder: &mut LabelSetEncoder) -> fmt::Result {
         use fmt::Write;
         use prometheus_client::encoding::EncodeLabelKey;
 
@@ -205,15 +205,8 @@ impl EncodeLabelSet for Topic {
         EncodeLabelKey::encode(&"topic", &mut key_encoder)?;
         let mut value_encoder = key_encoder.encode_label_value()?;
 
-        // Escape the characters that the text exposition format reserves in label values.
-        for c in String::from_utf8_lossy(self.as_ref()).chars() {
-            match c {
-                '\\' => value_encoder.write_str(r"\\")?,
-                '"' => value_encoder.write_str(r#"\""#)?,
-                '\n' => value_encoder.write_str(r"\n")?,
-                c => value_encoder.write_char(c)?,
-            }
-        }
+        // `prometheus-client` escapes the characters that the text exposition format reserves.
+        value_encoder.write_str(&String::from_utf8_lossy(self.as_ref()))?;
 
         value_encoder.finish()
     }
