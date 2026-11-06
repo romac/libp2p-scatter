@@ -27,24 +27,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           components: rustfmt
       - name: Check formatting
-        uses: actions-rust-lang/rustfmt@v1
+        uses: actions-rust-lang/rustfmt@4066006ec54a31931b9b1fddfd38f2fdf2d27143 # v1.1.2
 
   test:
     name: Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cargo-nextest
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-nextest
       - name: Run tests
         run: cargo nextest run --all-features --no-fail-fast
 
@@ -53,11 +55,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - name: Install cargo-msrv
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-msrv@0.20.0-beta.4
       # The default check is ambiguous, because the dev-dependencies include
@@ -70,17 +72,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cargo-nextest
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-nextest
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-llvm-cov
       - name: Run tests with coverage
         run: cargo llvm-cov nextest --lcov --output-path lcov.info --no-fail-fast
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
           fail_ci_if_error: false
@@ -92,9 +98,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           components: clippy
       - name: Run clippy
@@ -105,25 +111,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           toolchain: nightly
           components: clippy
       - name: Run clippy
-        uses: actions-rs/clippy@master
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --all-targets
+        run: cargo clippy --all-features --all-targets
 
   publish-dry-run:
     name: Publish (dry-run)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - name: Publish (dry-run)
         run: cargo publish --dry-run
